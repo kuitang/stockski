@@ -24,6 +24,12 @@ import urllib.request
 
 EXCHANGES = {"NYSE", "NYSE ARCA", "NYSE MKT", "NASDAQ", "AMEX", "BATS"}  # PLAN §6.1 listed-primary venues
 SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")  # PLAN: plain 1-5 capital letters; excludes share-class dots, units, warrants suffixes
+# EODHD recycled-ticker archives (phase0 finding #1): a dead prior user of a now-reused ticker is
+# served under an archive code and is its OWN lane (the live successor is a different company/lane).
+# Two archive families exist in the US list:
+#   SYM_old, SYM_old1, SYM_old2, SYM_oldoldold  -> r"_old(?:old)*\d?$"
+#   SYM1, SYM2 (trailing digit, e.g. AAP1 = Amway Asia Pacific, the pre-Advance-Auto user of AAP)
+ARCHIVE_RE = re.compile(r"^[A-Z]{1,5}(?:_old(?:old)*\d?|\d)$")
 # Word-boundary match so e.g. UNITED/WRIGHT survive while "UNITS"/"RIGHTS" instruments are dropped.
 NAME_DROP_RE = re.compile(r"\b(WARRANTS?|RIGHTS?|UNITS?|PREFERRED|PREF|PFD)\b")
 
@@ -69,7 +75,7 @@ def is_candidate(rec: dict) -> bool:
     if rec.get("Exchange") not in EXCHANGES:
         return False
     code = rec.get("Code") or ""
-    if not SYMBOL_RE.match(code):
+    if not (SYMBOL_RE.match(code) or ARCHIVE_RE.match(code)):
         return False
     return not NAME_DROP_RE.search((rec.get("Name") or "").upper())
 
@@ -119,8 +125,10 @@ def main():
     tmp = out + ".tmp"
     json.dump(rows, open(tmp, "w"), indent=0)
     os.replace(tmp, out)
-    print(f"wrote {out}: {len(rows)} candidates ({n_live} live, {n_del} delisted)")
-    print('GATE ' + json.dumps({"era": args.era, "candidates": len(rows), "live": n_live, "delisted": n_del}))
+    n_arch = sum(1 for r in rows if ARCHIVE_RE.match(r["symbol"]))
+    print(f"wrote {out}: {len(rows)} candidates ({n_live} live, {n_del} delisted, {n_arch} recycled-ticker archives)")
+    print('GATE ' + json.dumps({"era": args.era, "candidates": len(rows), "live": n_live,
+                                "delisted": n_del, "archives": n_arch}))
 
 
 if __name__ == "__main__":
