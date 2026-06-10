@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!-- viewport-fit=cover + user-scalable=no: full-bleed game surface on notched phones (plan §7) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#f6f8fc" />
+  <title>Stock Universe Skier</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #f6f8fc;
+      overflow: hidden;
+      overscroll-behavior: none; /* no pull-to-refresh / rubber-band (plan §7 mobile lockdown) */
+    }
+    #app {
+      position: fixed; /* position:fixed + 100dvh, never 100vh (plan §7) */
+      inset: 0;
+      height: 100dvh;
+      touch-action: none; /* gestures belong to the game, not the browser (plan §7) */
+    }
+    #app canvas { display: block; }
+    #msg {
+      position: fixed;
+      top: max(12px, env(safe-area-inset-top));
+      left: max(12px, env(safe-area-inset-left));
+      font: 14px/1.4 system-ui, sans-serif;
+      color: #345;
+      background: rgba(246, 248, 252, 0.7);
+      padding: 4px 8px;
+      border-radius: 6px;
+      z-index: 30;
+      pointer-events: none;
+    }
+    #pause {
+      position: fixed;
+      inset: 0;
+      display: none;
+      place-items: center;
+      font: 700 28px system-ui, sans-serif;
+      color: #234;
+      background: rgba(246, 248, 252, 0.55);
+      z-index: 40;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="msg">loading era…</div>
+  <div id="pause">PAUSED — ESC to resume</div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

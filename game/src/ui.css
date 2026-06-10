@@ -1,0 +1,180 @@
+/* ui.css — mobile lockdown + HUD styling (plan §7, CONTRACTS §3).
+   Lockdown contract: position:fixed body, 100dvh (never 100vh), overscroll-behavior none,
+   touch-action none, safe-area padding, 44pt touch targets, no rubber-band / pull-to-refresh. */
+
+:root {
+  /* Apple HIG minimum touch target: 44pt ~= 44 CSS px */
+  --touch-min: 44px;
+  --hud-bg: rgba(10, 16, 26, 0.62);
+  --hud-fg: #e8eef6;
+  --gain: #4ade80;  /* green for positive P&L */
+  --loss: #f87171;  /* red for negative P&L */
+}
+
+html {
+  height: 100%;
+  overscroll-behavior: none;     /* no scroll chaining / pull-to-refresh */
+}
+
+body {
+  position: fixed;               /* the only reliable iOS Safari scroll kill (plan §7) */
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;                /* dvh: tracks the dynamic browser chrome; 100vh overshoots on mobile */
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;            /* all gestures belong to the game surface */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;   /* no long-press callout over game zones */
+  -webkit-tap-highlight-color: transparent;
+  background: #0a101a;
+  color: var(--hud-fg);
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* keep playable UI out of the notch / home-indicator regions */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+canvas {
+  display: block;
+  touch-action: none;            /* belt-and-braces with the non-passive preventDefault in input.js */
+}
+
+/* ---------- HUD: top-left card (ticker / company / day % / wealth / ghost gap) ---------- */
+
+#hud {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  left: calc(10px + env(safe-area-inset-left));
+  min-width: 180px;
+  padding: 10px 14px;
+  background: var(--hud-bg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: none;          /* HUD never steals a gesture from the game zones */
+  line-height: 1.35;
+  z-index: 10;
+}
+
+#hud .hud-sym {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+#hud .hud-dayret {
+  font-size: 22px;
+  font-weight: 700;
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+#hud .hud-name {
+  font-size: 12px;
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+#hud .hud-sector,
+#hud .hud-date {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+#hud .hud-wealth {
+  font-size: 16px;
+  font-weight: 600;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+#hud .hud-ghostgap {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pnl-pos { color: var(--gain); }
+.pnl-neg { color: var(--loss); }
+.pnl-flat { color: var(--hud-fg); }
+
+/* ---------- exposure readout: bottom-right vertical bar (w dial) ---------- */
+
+#exposure {
+  position: fixed;
+  right: calc(12px + env(safe-area-inset-right));
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  width: var(--touch-min);       /* >= 44pt so the visual dial doubles as a touch reference */
+  height: 140px;                 /* tall enough to read w at a glance mid-run */
+  padding: 6px;
+  background: var(--hud-bg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: none;          /* right-third drags pass through to the game surface */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  z-index: 10;
+}
+
+#exposure .w-track {
+  position: relative;
+  flex: 1;
+  width: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+#exposure .w-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;                  /* hud.js scales via style.height = `${w*100}%` */
+  background: linear-gradient(to top, #60a5fa, #a5d8ff);
+  border-radius: 5px;
+}
+
+#exposure .w-num {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* generic rule: anything tappable meets the 44pt minimum */
+button, .touch-target {
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+}
+
+/* ---------- landscape-rotate prompt (portrait + narrow phones only, plan §7) ---------- */
+
+#rotate-prompt {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(8, 12, 20, 0.94);
+  color: var(--hud-fg);
+  text-align: center;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 18px;
+  padding: 24px;
+}
+
+/* 700px: wider-than-this portrait devices (tablets) are playable without rotating */
+@media (orientation: portrait) and (max-width: 700px) {
+  #rotate-prompt { display: flex; }
+}
