@@ -28,6 +28,12 @@ export class WorldClock {
   /** Advance τ by dtSec of real time (no-op while paused). Auto-checkpoints crossed month boundaries. */
   update(dtSec) {
     if (this.paused) return this.tau;
+    return this.tick(dtSec);
+  }
+
+  /** Advance τ IGNORING pause — debug.runScript drives time synchronously while the clock is
+   *  paused (it pauses so the render loop can't double-step). Same clamp + checkpoint bookkeeping. */
+  tick(dtSec) {
     this.tau = Math.min(this.tau + this.daysPerSec * dtSec, this.maxTau);
     while (this._bi < this.boundaries.length && this.boundaries[this._bi] <= this.tau) {
       this._ckpt = this.boundaries[this._bi];

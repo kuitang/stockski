@@ -8,7 +8,7 @@ nonzero on gate failure. Every step is idempotent: re-runs skip cached artifacts
 Run order (recent2y):
 
 ```bash
-.venv/bin/python pipeline/build_universe.py  --era recent2y --data-dir data
+.venv/bin/python pipeline/build_universe.py  --era recent2y --data-dir data --delisted
 .venv/bin/python pipeline/download_prices.py --era recent2y --data-dir data --rps 12
 .venv/bin/python pipeline/rf_spy.py          --era recent2y --data-dir data
 .venv/bin/python pipeline/qc.py              --era recent2y --data-dir data
@@ -31,7 +31,8 @@ drop of warrants/rights/units/preferred. Writes `data/universe_src/candidates_<e
 The delisted list carries no dates, so delisted candidates can only be assigned to an
 era after their histories are downloaded; pass `--delisted` to add all delisted
 candidates to the download set — `qc.py` then keeps only those whose EOD history ends
-inside the era window. (The recent2y v1 run downloads live candidates only.)
+inside the era window (the recent2y run uses `--delisted`; ~10k delisted histories end
+before the window and are dropped at QC as `delisted_outside_window`).
 Share-class dedup also happens post-download in `qc.py` (it needs dollar volume).
 
 ## download_prices.py

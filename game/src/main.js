@@ -23,7 +23,7 @@ async function loadOptional(name) {
   try { return await loader(); } catch (e) { console.warn(`optional module ${name} failed:`, e); return null; }
 }
 
-const START_TAU = 5;        // spawn with ~5 day-strips of history behind you for orientation
+const START_TAU = 1;        // spawn at day 1 (task spec): one revealed day-strip behind you, dayRet defined
 const SPAWN_WAIT_MS = 8000; // first-tile budget: matches plan §7 mobile load target (< 8 s)
 const RESPAWN_DELAY_MS = 1800; // long enough to read the death cause, short enough to retry eagerly
 const CAM_BACK = 13;        // chase cam: m behind the skier (+z = into history)
@@ -105,6 +105,48 @@ async function pickStream() {
 const msgEl = () => document.getElementById('msg');
 function showMsg(text) { const el = msgEl(); if (el) { el.textContent = text; el.style.display = text ? 'block' : 'none'; } }
 
+/** Full-screen death overlay (plan §7 death/respawn): created lazily so index.html stays minimal. */
+function deathEl() {
+  let el = document.getElementById('death');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'death';
+    // mirrors #pause styling: centered, non-interactive, above the HUD
+    el.style.cssText =
+      'position:fixed;inset:0;display:none;place-items:center;text-align:center;' +
+      'font:700 28px system-ui,sans-serif;color:#7a1f1f;background:rgba(246,248,252,0.7);' +
+      'z-index:50;pointer-events:none;white-space:pre-line;';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function showDeath(text) {
+  const el = deathEl();
+  el.textContent = text ?? '';
+  el.style.display = text ? 'grid' : 'none';
+}
+
+/** Spawn lane (task spec): manifest symbol with the highest first-day dollar volume
+ *  (lane.dv0, written by export_tiles.py). Manifests without dv0 (synthetic) fall back to
+ *  the first lane alive at day 0 that survives the whole era — lane 0 for synthetic —
+ *  so a fresh player is never dropped onto a lane that delists under them at spawn. */
+function pickSpawnLane(m) {
+  const isReal = (l) => l.born === 0 && l.sym && !String(l.sym).startsWith('_'); // alive at era start, not padding
+  let best = -1;
+  let bestDv = 0; // dv0 must be strictly positive: a zero-volume first day is not a tradable spawn
+  for (let i = 0; i < m.lanes.length; i++) {
+    const l = m.lanes[i];
+    if (!isReal(l)) continue;
+    const dv = Number(l.dv0);
+    if (Number.isFinite(dv) && dv > bestDv) { bestDv = dv; best = i; }
+  }
+  if (best >= 0) return best;
+  const survivor = m.lanes.findIndex((l) => isReal(l) && l.dead === -1);
+  if (survivor >= 0) return survivor;
+  const first = m.lanes.findIndex(isReal);
+  return first >= 0 ? first : 0;
+}
+
 async function boot() {
   const stream = await pickStream();
   const m = stream.manifest;
@@ -135,9 +177,8 @@ async function boot() {
   // --- clock + spawn --------------------------------------------------------------------
   const clock = new WorldClock({ daysPerSec: CFG.CLOCK_DPS, dates: m.dates, startTau: START_TAU });
 
-  // spawn on the first lane alive at the era start (skip pipeline padding lanes)
-  let spawnLane = m.lanes.findIndex((l) => l.born === 0 && !String(l.sym).startsWith('_'));
-  if (spawnLane < 0) spawnLane = 0;
+  // spawn lane per task spec: highest first-day-dollar-volume symbol, lane 0 for synthetic
+  const spawnLane = pickSpawnLane(m);
   const spawnS = (spawnLane + 0.5) * CFG.LANE_M; // plateau center of the spawn lane (terrain.js convention)
 
   stream.ensure(clock.tau, spawnLane);
@@ -149,12 +190,21 @@ async function boot() {
   }
 
   // --- physics world adapter (physics.js world interface) --------------------------------
+  const wrapLane = (l) => ((l % m.nLanes) + m.nLanes) % m.nLanes;
+  // dominant holding of the blend pair (terrain lane = left lane i, u = blend toward i+1):
+  // the symbol "under foot" for HUD/labels is lane+1 once the majority of weight is there
+  const dispLane = (st) => wrapLane((st.lane ?? 0) + ((st.u ?? 0) >= 0.5 ? 1 : 0));
   const world = {
     heightAt: (s, dayF) => {
       const q = heightAt(s, dayF, stream);
       return Number.isNaN(q.h) ? null : q; // physics.js expects null for void
     },
     laneRate: (lane, dayF) => stream.zLaneDeriv(lane, dayF).dz, // dz/dday, NaN if void
+    laneZ: (lane, dayF) => stream.zLaneDeriv(lane, dayF).z, // held z level: exact wealth telescoping
+    laneTerm: (lane) => {
+      const l = m.lanes[wrapLane(lane)];
+      return l ? { term: l.term, dead: l.dead } : null; // acquisition kicker info (plan §2.3)
+    },
     rfAnnual: (dayF) => {
       const d = Math.min(Math.max(Math.floor(dayF), 0), m.nDays - 1);
       return m.rf?.[d] ?? 0;
@@ -232,13 +282,14 @@ async function boot() {
   function handleDeath() {
     if (!state.dead || deathPending) return;
     deathPending = true;
-    showMsg(`WIPEOUT — ${state.deathCause ?? 'crash'} · rewinding to checkpoint…`);
+    const ckptDate = m.dates[Math.min(ckpt.tau, m.nDays - 1)] ?? '';
+    showDeath(`WIPEOUT — ${state.deathCause ?? 'crash'}\nrewinding to checkpoint ${ckptDate}…`);
     setTimeout(() => {
-      clock.rewind();
-      skier = makeSkierSim(ckpt.s, clock.tau, ckpt.logW);
+      clock.rewind(); // plan §7: respawn rewinds the world clock to the month-boundary checkpoint
+      skier = makeSkierSim(ckpt.s, clock.tau, ckpt.logW); // …and wealth to its checkpointed value
       state = snapshot(skier);
       deathPending = false;
-      showMsg('');
+      showDeath('');
     }, RESPAWN_DELAY_MS);
   }
 
@@ -265,7 +316,6 @@ async function boot() {
 
   // --- debug hook (debug.js Debug class, CONTRACTS §4) -------------------------------------
   let fps = 0;
-  const wrapLane = (l) => ((l % m.nLanes) + m.nLanes) % m.nLanes;
   // stable facade: debug.js holds one skier reference, but main swaps skiers on respawn/spawn
   const skierFacade = {
     get state() { return state; },
@@ -300,7 +350,7 @@ async function boot() {
       state: () => ({
         tau: clock.tau,
         dateStr: m.dates[Math.min(Math.floor(clock.tau), m.nDays - 1)],
-        s: state.s, lane: wrapLane(state.lane), sym: m.lanes[wrapLane(state.lane)]?.sym,
+        s: state.s, lane: dispLane(state), sym: m.lanes[dispLane(state)]?.sym,
         u: state.u, w: state.w, grounded: state.grounded, dead: state.dead,
         logW: state.logW, wealth: startWealth * Math.exp(state.logW),
         ghostLogW: ghostZ(clock.tau) - ghostZ0, fps,
@@ -339,7 +389,9 @@ async function boot() {
     const dt = Math.min(dtRaw, 0.25); // clamp: a tab-switch hitch must not warp τ by minutes
     if (dtRaw > 0) fps = fps * 0.95 + (1 / Math.max(dtRaw, 1e-4)) * 0.05; // EMA, ~1 s horizon
 
-    if (!paused && !deathPending) {
+    // also gate on clock.paused: debug pause()/runScript pause only the CLOCK — stepping the
+    // skier then would advance skier.day past a frozen τ and break the frontier pin
+    if (!paused && !clock.paused && !deathPending) {
       acc += dt;
       const inp = pollInput();
       while (acc >= H) {
@@ -347,6 +399,11 @@ async function boot() {
         stepWorld(1, inp);
       }
       handleDeath();
+      if (clock.tau >= clock.maxTau) {
+        // era end: τ clamps but skier.day would keep integrating into nonexistent days — stop the run
+        setPaused(true);
+        showMsg(`era complete — ${m.dates[m.nDays - 1] ?? ''}`);
+      }
     }
 
     // streaming + geometry keyed to τ and the skier's lane neighborhood
@@ -367,7 +424,7 @@ async function boot() {
     sky.position.copy(camera.position); // sky is at infinity: never parallax
 
     if (hud) {
-      const lane = wrapLane(state.lane);
+      const lane = dispLane(state); // dominant holding: the symbol actually under foot
       const meta = m.lanes[lane] ?? {};
       hud.update(state, {
         sym: meta.sym ?? '—',

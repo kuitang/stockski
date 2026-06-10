@@ -118,16 +118,38 @@ export class TileStream {
     return v === CFG.Z_NAN ? NaN : v / CFG.Z_SCALE;
   }
 
+  /** Last revealed close at or before day d−1 for `lane`, walking back through any
+   *  not-yet-resident gap. Look-back bound = one tile of days: a boundary fetch gap is at
+   *  worst one tile deep while the prefetch window keeps the previous tile resident.
+   *  Returns a finite z to hold, NaN if the lane is genuinely void behind us
+   *  (post-delisting / pre-IPO), or null if nothing at all is resident to hold. */
+  _heldBack(d, lane) {
+    const lo = Math.max(0, d - this.td);
+    for (let k = d - 1; k >= lo; k--) {
+      const v = this._raw(k, lane);
+      if (v !== null) return v; // finite close to hold, or NaN = real void behind
+    }
+    return null;
+  }
+
   /**
    * PCHIP (Fritsch–Carlson monotone cubic Hermite) over the lane's daily z values.
    * Monotone => every interpolated price stays between the bracketing real closes (plan §1).
    * Returns {z, dz} with dz in z-units per trading day; {NaN, NaN} for void.
+   * NOT-RESIDENT ≠ VOID: when day d's tile is merely not resident yet (it only became
+   * requestable this instant — causality forbids asking before τ, plan §4.5 — or the
+   * fetch is in flight), hold the last revealed close flat instead of returning NaN,
+   * so a LIVE lane never reads as a phantom crevasse at 64-day tile boundaries.
    */
   zLaneDeriv(lane, dayF) {
     const d = Math.floor(dayF);
     const f = dayF - d;
     const y1 = this._raw(d, lane);
-    if (y1 === null || Number.isNaN(y1)) return { z: NaN, dz: NaN };
+    if (y1 === null) {
+      const held = this._heldBack(d, lane);
+      return Number.isFinite(held) ? { z: held, dz: 0 } : { z: NaN, dz: NaN };
+    }
+    if (Number.isNaN(y1)) return { z: NaN, dz: NaN };
     if (f === 0) {
       // exact node: value is the close itself; slope is the FC node slope (one-sided at gaps)
       const y0 = this._raw(d - 1, lane);

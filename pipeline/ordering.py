@@ -178,8 +178,15 @@ def main(argv=None):
     data_dir = Path(args.data_dir)
     era = load_era(Path(args.config), args.era)
     start = pd.Timestamp(era["start"])
-    end = pd.Timestamp(era["end"])
-    burnin = pd.Timestamp(era.get("burnin_start", era["start"]))
+    # end: null in eras.json means "through the latest available data" (CONTRACTS 5)
+    end = pd.Timestamp(era["end"]) if era.get("end") else pd.Timestamp.max
+    if era.get("burnin_start"):
+        burnin = pd.Timestamp(era["burnin_start"])
+    elif era.get("burnin_days"):
+        # burnin_days counts business days before era start (eras.json recent2y form)
+        burnin = start - pd.tseries.offsets.BDay(int(era["burnin_days"]))
+    else:
+        burnin = start
     top_n = int(era["top_n"])
 
     uni = pd.read_parquet(data_dir / "universe.parquet")

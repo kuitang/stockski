@@ -11,6 +11,12 @@
 //                            u }       // lateral blend 0..1 toward lane+1 (plan §1 smoothstep)
 //                        | null        // void: no terrain (pre-IPO gap / post-death plateau end)
 //     laneRate(lane, dayF) -> dz/dday  // log-return per trading day for that lane; NaN if void
+//     laneZ?(lane, dayF)   -> z        // OPTIONAL cumulative log-return level (held flat across
+//                                      // tile-fetch gaps); when present, wealth accrues from exact
+//                                      // z DIFFERENCES so the per-step sum telescopes — no daily
+//                                      // return is ever dropped at 64-day tile boundaries
+//     laneTerm?(lane)      -> {term, dead} | null  // OPTIONAL manifest termination info for the
+//                                      // acquisition kicker (plan §2.3); dead = last day index
 //     rfAnnual(dayF)       -> r_f      // annualized risk-free rate (decimal), causal (plan §2.2)
 //     daysPerSec           -> number   // world-clock speed (trading days per real second)
 //   }
@@ -60,6 +66,7 @@ export class Skier {
     this.grip = 0;
     this.slopeForce = 0;
     this.steerForce = 0;
+    this._zEnd = null; // end-of-step laneZ cache: telescoping wealth sum (see _stockReturn)
     const q = world.heightAt(s0, day0);
     if (q) {
       this.y = q.h;
@@ -86,22 +93,31 @@ export class Skier {
   step(dtSec, input = {}) {
     if (this.dead) return this._state();
     const steer = clamp(input.steer ?? 0, -1, 1);
-    const wTarget = clamp(input.wTarget ?? this.w, 0, 1);
     const dps = this.world.daysPerSec;
     const dday = dps * dtSec;
-
-    this._dial(wTarget, dtSec);
 
     // terrain at the start-of-step instant (left endpoint of this slice of time)
     const q = this.world.heightAt(this.s, this.day);
     if (q) { this.lane = q.lane; this.u = q.u; }
 
+    // Acquisition KICKER (plan §2.3): the dominant holding's lane ended as a high ledge —
+    // shareholders are cashed out at the final (premium) price: forced w→0 mid-air,
+    // never a loss. The wealth integral below then ticks at r_f, exactly "cash for shares".
+    if (!q && this.w > 0 && this._acquiredOut()) {
+      this.w = 0;
+      this._snapped = false;
+    }
+
+    // over void there is nothing to BUY: wTarget can hold or reduce exposure but not raise it
+    // (you cannot buy a delisted name; bankruptcy death still requires RIDING IN fully
+    // weighted with the detent latched, plan §2.3 — that path is untouched)
+    let wTarget = clamp(input.wTarget ?? this.w, 0, 1);
+    if (!q) wTarget = Math.min(wTarget, this.w);
+    this._dial(wTarget, dtSec);
+
     // --- WEALTH: the invariant (plan §2.1). Sideways motion changes nothing except u. ---
-    const rI = nz(this.world.laneRate(this.lane, this.day));
-    const rJ = nz(this.world.laneRate(this.lane + 1, this.day));
     const rfDaily = this.world.rfAnnual(this.day) / PHYS.TRADING_DAYS;
-    this.logW +=
-      (this.w * ((1 - this.u) * rI + this.u * rJ) + (1 - this.w) * rfDaily) * dday;
+    this.logW += this._stockReturn(dday) + (1 - this.w) * rfDaily * dday;
 
     // world clock advances; the skier is pinned to the frontier (plan §0)
     this.day += dday;
@@ -139,6 +155,43 @@ export class Skier {
       this.w = 1; // sticky full exposure: finite-measure wipeout condition (plan §3)
       this._snapped = true;
     }
+  }
+
+  /** True when the lane carrying the skier's dominant weight ended by ACQUISITION and the
+   *  clock is past its last trading day — the ledge case, never a crevasse (plan §2.3). */
+  _acquiredOut() {
+    const hold = this.u >= 0.5 ? this.lane + 1 : this.lane; // dominant holding of the blend pair
+    const info = this.world.laneTerm?.(hold);
+    return !!info && info.term === 'acquisition' && info.dead >= 0 && this.day > info.dead;
+  }
+
+  /** w-weighted stock log-return over [day, day+dday] (plan §2.1).
+   *  Prefers exact close-to-close z DIFFERENCES (world.laneZ): the per-step sum telescopes to
+   *  z(end)−z(start) on a held lane, so the wealth identity survives tile-fetch latency at
+   *  64-day tile boundaries — a frontier-held (stale) z contributes 0 until the tile lands,
+   *  then the whole catch-up arrives in one step, independent of fetch timing.
+   *  Falls back to laneRate·dday for analytic mock worlds without laneZ. */
+  _stockReturn(dday) {
+    if (this.w === 0) { this._zEnd = null; return 0; } // cash: no stock term, restart cache on re-land
+    const { world } = this;
+    if (typeof world.laneZ !== 'function') {
+      const rI = nz(world.laneRate(this.lane, this.day));
+      const rJ = nz(world.laneRate(this.lane + 1, this.day));
+      return this.w * ((1 - this.u) * rI + this.u * rJ) * dday;
+    }
+    const d1 = this.day + dday;
+    // start-of-step z: reuse last step's END values when the lane pair is unchanged, so a tile
+    // landing BETWEEN two steps cannot drop its return into the crack between evaluations
+    const c = this._zEnd && this._zEnd.lane === this.lane ? this._zEnd : null;
+    const zi0 = c ? c.zi : world.laneZ(this.lane, this.day);
+    const zj0 = c ? c.zj : world.laneZ(this.lane + 1, this.day);
+    const zi1 = world.laneZ(this.lane, d1);
+    const zj1 = world.laneZ(this.lane + 1, d1);
+    this._zEnd = { lane: this.lane, zi: zi1, zj: zj1 };
+    // void/halted endpoint: a dead name contributes 0 to the integral (loss lands via death, plan §3)
+    const dI = Number.isFinite(zi0) && Number.isFinite(zi1) ? zi1 - zi0 : 0;
+    const dJ = Number.isFinite(zj0) && Number.isFinite(zj1) ? zj1 - zj0 : 0;
+    return this.w * ((1 - this.u) * dI + this.u * dJ);
   }
 
   // Grounded: y = h constraint, every terrain force scaled by w (plan §3)

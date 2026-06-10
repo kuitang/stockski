@@ -37,7 +37,11 @@ export function heightAt(s, dayF, stream) {
   const h = K * ((1 - u) * zi.z + u * zj.z);
   const dh_ds = (K * du_dq * (zj.z - zi.z)) / CFG.LANE_M;     // TRUE geometry; physics saturates forces, not us (plan §3)
   const dh_dt = K * ((1 - u) * zi.dz + u * zj.dz);            // m per trading day
-  return { h, dh_ds, dh_dt, lane: u < 0.5 ? i : j, u };
+  // lane is ALWAYS the left lane i of the blend pair: u is the blend toward lane+1, exactly
+  // the convention physics' wealth identity assumes (plan §2.1) — returning j for u ≥ 0.5
+  // would make physics accrue the WRONG pair of lanes over half the lateral domain.
+  // The dominant holding for display purposes is lane + (u >= 0.5 ? 1 : 0).
+  return { h, dh_ds, dh_dt, lane: i, u };
 }
 
 /**

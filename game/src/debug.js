@@ -66,7 +66,11 @@ export class Debug {
     const tau = clock.tau;
     const nDays = m.nDays ?? 0;
     const d = Math.min(Math.max(Math.floor(tau), 0), Math.max(nDays - 1, 0));
-    const lane = st.lane ?? 0;
+    // dominant holding: terrain's lane is the LEFT lane of the blend pair (u toward lane+1),
+    // so the symbol under foot is lane+1 once the majority of weight is there
+    const nLanes = m.nLanes ?? 0;
+    let lane = (st.lane ?? 0) + ((st.u ?? 0) >= 0.5 ? 1 : 0);
+    if (nLanes > 0) lane = ((lane % nLanes) + nLanes) % nLanes;
     return {
       tau,
       dateStr: m.dates?.[d] ?? '',
@@ -116,12 +120,28 @@ export class Debug {
         const day = Math.floor(clock.tau);
         if (day !== lastDay) { // prefetch once per day boundary, not per 120 Hz step
           lastDay = day;
-          stream.ensure?.(clock.tau);
+          // prefetch AROUND THE SKIER (not lane 0) and let the fetches actually LAND
+          // before stepping on — fetch completion needs macrotasks, a bare microtask
+          // yield can never deliver an HTTP response mid-script
+          stream.ensure?.(clock.tau, this._skierState().lane ?? 0);
+          await this._settle();
         }
         this._lastState = skier.step(dt, input, tFn, clock);
       }
-      await Promise.resolve(); // yield so pending tile fetches/microtasks can settle between steps
     }
     return this.state();
+  }
+
+  /** Macrotask-yield until the stream has no in-flight tile fetches (bounded). Scripted
+   *  trajectories become latency-independent: the same tiles are resident at the same step
+   *  index every run — the CONTRACTS §4 determinism requirement. */
+  async _settle() {
+    const inflight = this.deps.stream?.inflight;
+    if (!inflight) return;
+    const SETTLE_MS = 2000; // tiles are local static files (ms to land); 2 s bounds a stalled fetch
+    const t0 = Date.now();
+    while (inflight.size > 0 && Date.now() - t0 < SETTLE_MS) {
+      await new Promise((r) => setTimeout(r, 0)); // macrotask: lets fetch responses deliver
+    }
   }
 }

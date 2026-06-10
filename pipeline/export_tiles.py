@@ -57,10 +57,31 @@ def _load_adj_close(data_dir: Path, sym: str) -> pd.Series:
     return pd.Series(df["adjusted_close"].values, index=pd.to_datetime(df["date"])).sort_index()
 
 
+def _first_day_dollar_vol(data_dir: Path, sym: str, start, end) -> float:
+    """Dollar volume (unadjusted close x shares) on the symbol's first trading day in the era.
+
+    Consumed by the game as manifest lane field "dv0": the spawn rule picks the
+    highest first-day-dollar-volume lane (integrator task spec)."""
+    try:
+        df = pd.read_parquet(data_dir / "parquet" / f"{sym}.parquet",
+                             columns=["date", "close", "volume"])
+    except Exception:
+        return 0.0
+    df = df.assign(_dt=pd.to_datetime(df["date"])).sort_values("_dt")
+    df = df[(df["_dt"] >= start) & (df["_dt"] <= end)]
+    if df.empty:
+        return 0.0
+    row = df.iloc[0]
+    dv = float(row["close"]) * float(row["volume"])
+    return dv if np.isfinite(dv) else 0.0
+
+
 def build_era(era: dict, order: list, data_dir: Path, out_root: Path):
     """Build tiles + manifest. Returns (Z_float [nDays x nRealLanes], manifest dict)."""
     data_dir, out_root = Path(data_dir), Path(out_root)
-    start, end = pd.Timestamp(era["start"]), pd.Timestamp(era["end"])
+    start = pd.Timestamp(era["start"])
+    # end: null in eras.json means "through the latest available data" (CONTRACTS 5)
+    end = pd.Timestamp(era["end"]) if era.get("end") else pd.Timestamp.max
     uni = pd.read_parquet(data_dir / "universe.parquet").set_index("symbol")
     sectors = load_sectors(data_dir)
 
@@ -127,10 +148,12 @@ def build_era(era: dict, order: list, data_dir: Path, out_root: Path):
             "born": int(born[li]),
             "dead": dead,
             "term": term if dead != -1 else "alive",
+            # spawn-rule input (integrator task spec): first-era-day dollar volume
+            "dv0": _first_day_dollar_vol(data_dir, sym, start, end),
         })
     for _ in range(n_real, n_lanes):  # padding lanes: born = -1 marks "never exists"
         lanes_meta.append({"sym": "", "name": "", "sector": "Unknown",
-                           "c": 0.0, "born": -1, "dead": -1, "term": "unknown"})
+                           "c": 0.0, "born": -1, "dead": -1, "term": "unknown", "dv0": 0.0})
 
     # --- ghost (SPY cumulative log return, aligned to dates) ---------------------
     spy = _load_adj_close(data_dir, "SPY")
