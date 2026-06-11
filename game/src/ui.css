@@ -242,3 +242,19 @@ button, .touch-target {
 @media (orientation: portrait) and (max-width: 700px) {
   #rotate-prompt { display: flex; }
 }
+
+/* ---------- narrow screens: two HUD rows (user spec 2026-06-11) ----------
+   The top-left portfolio card and the top-center $ pill collide when the viewport can't fit
+   both side by side. Row 1 = $ anchor, centered (it owns the top); row 2 = portfolio card,
+   pushed below the pill. 900px: widest viewport where a worst-case dual-ticker line
+   ("XXXX 55% · YYYY 45% · borrow 38%") plus the $ pill overflow side by side. */
+@media (max-width: 900px) {
+  #wealth { padding: 2px 14px 5px; }
+  #wealth .wealth-fig { font-size: 24px; }  /* mobile tier of the anchor: still dominant, fits one row */
+  #wealth .wealth-delta { font-size: 11px; }
+  #hud {
+    /* row 2: clears the ~67px-bottom pill at any width (24px fig + 11px delta + padding + 18px top) */
+    top: calc(74px + env(safe-area-inset-top));
+    font-size: 13px;
+  }
+}
