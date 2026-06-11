@@ -375,10 +375,12 @@ def main():
                      "first_date": first_date, "last_date": last_date,
                      "median_dollar_vol_63d_last": dv, "termination": termination})
 
-    # Share-class dedup: same normalized name AND overlapping spans => keep the LONGEST
+    # Share-class dedup: same normalized name AND substantially overlapping spans (> 50%
+    # of the shorter span — old/new GM coexisted ~4 months in 2010-11 and are BOTH real
+    # lanes, while GOOG/GOOGL or SUNW_old/JAVA_old overlap ~fully) => keep the LONGEST
     # span (a rename split across archive codes must keep the full-history one, e.g.
     # JAVA_old 1997-2010 over SUNW_old 2003-07), tie-break higher dollar volume (GOOGL
-    # over GOOG). Non-overlapping namesakes are temporal ticker recycling: both kept.
+    # over GOOG). Other namesakes are temporal ticker recycling: both kept.
     uni = pd.DataFrame(rows)
     dedup_pairs = []
     if not uni.empty:
@@ -391,10 +393,16 @@ def main():
                 continue
             grp = grp.sort_values(["_span", "median_dollar_vol_63d_last"], ascending=False)
             kept = []
+
+            def substantial_overlap(i, j):
+                f1, l1 = pd.Timestamp(uni.at[i, "first_date"]), pd.Timestamp(uni.at[i, "last_date"])
+                f2, l2 = pd.Timestamp(uni.at[j, "first_date"]), pd.Timestamp(uni.at[j, "last_date"])
+                ov = (min(l1, l2) - max(f1, f2)).days
+                shorter = max(1, min((l1 - f1).days, (l2 - f2).days))
+                return ov / shorter > 0.5
+
             for idx in grp.index:
-                f, l = uni.at[idx, "first_date"], uni.at[idx, "last_date"]
-                clash = next((k for k in kept
-                              if not (l < uni.at[k, "first_date"] or f > uni.at[k, "last_date"])), None)
+                clash = next((k for k in kept if substantial_overlap(idx, k)), None)
                 if clash is None:
                     kept.append(idx)
                 else:

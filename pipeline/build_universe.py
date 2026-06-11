@@ -33,7 +33,10 @@ ARCHIVE_RE = re.compile(r"^[A-Z]{1,5}(?:_old(?:old)*\d?|\d)$")
 # Word-boundary match so e.g. UNITED/WRIGHT survive while "UNITS"/"RIGHTS" instruments are dropped.
 NAME_DROP_RE = re.compile(r"\b(WARRANTS?|RIGHTS?|UNITS?|PREFERRED|PREF|PFD)\b")
 # Exchange test symbols (synthetic prices). Real "* Test Systems" companies are NOT matched.
-TEST_CODE_RE = re.compile(r"^Z[A-Z]ZZT$")
+# ^[A-Z]?TEST$ adds the NYSE/BATS connectivity-test family (CTEST/NTEST/ZTEST/PTEST/ATEST),
+# and ZTST is Cboe's listed test symbol — all have name == code; found live in the
+# full-era ordering, 2026-06. (NTST/ATST/STST are real companies and do NOT match.)
+TEST_CODE_RE = re.compile(r"^Z[A-Z]ZZT$|^[A-Z]?TEST$|^ZTST$")
 TEST_NAME_RE = re.compile(r"TEST (STOCK|SYMBOL)|LISTED TEST|TICK PILOT")
 
 

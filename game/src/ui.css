@@ -41,14 +41,14 @@ canvas {
   touch-action: none;            /* belt-and-braces with the non-passive preventDefault in input.js */
 }
 
-/* ---------- HUD: top-left card (ticker / company / day % / wealth / ghost gap) ---------- */
+/* ---------- HUD: top-left card (ticker / company / day % / date) — secondary tier ---------- */
 
 #hud {
   position: fixed;
   top: calc(10px + env(safe-area-inset-top));
   left: calc(10px + env(safe-area-inset-left));
-  min-width: 180px;
-  padding: 10px 14px;
+  min-width: 140px;              /* down from 180px: the card is no longer the anchor */
+  padding: 8px 12px;
   background: var(--hud-bg);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
@@ -60,42 +60,75 @@ canvas {
 }
 
 #hud .hud-sym {
-  font-size: 22px;
+  font-size: 16px;               /* demoted from 22px: the $ anchor owns the top of the hierarchy */
   font-weight: 700;
   letter-spacing: 0.02em;
 }
 
 #hud .hud-dayret {
-  font-size: 22px;
+  font-size: 15px;               /* day % stays legible but secondary (one step under the ticker) */
   font-weight: 700;
   margin-left: 8px;
   font-variant-numeric: tabular-nums;
 }
 
 #hud .hud-name {
-  font-size: 12px;
-  opacity: 0.85;
+  font-size: 11px;
+  opacity: 0.8;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 220px;
+  max-width: 200px;
 }
 
 #hud .hud-sector,
 #hud .hud-date {
-  font-size: 11px;
+  font-size: 10px;
   opacity: 0.6;
 }
 
-#hud .hud-wealth {
-  font-size: 16px;
-  font-weight: 600;
-  margin-top: 4px;
-  font-variant-numeric: tabular-nums;
+/* ---------- wealth anchor: top-center $ figure + delta row (session P&L, vs SPY) ---------- */
+
+#wealth {
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);   /* top-center: sits in the empty sky band, never over the slope read */
+  text-align: center;
+  pointer-events: none;
+  z-index: 10;
+  /* no card box: Alto-style minimal figure floating on the sky; shadow carries legibility */
+  text-shadow: 0 1px 8px rgba(6, 10, 18, 0.7), 0 0 2px rgba(6, 10, 18, 0.9);
+  font-variant-numeric: tabular-nums;  /* fixed-width digits: no jitter as the value ticks */
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --dd: 0;                       /* drawdown red-mix 0..1, written by hud.js in 2% steps */
 }
 
-#hud .hud-ghostgap {
-  font-size: 12px;
+#wealth .wealth-fig {
+  font-size: clamp(28px, 4vw, 44px);  /* large enough to anchor, capped so it never crowds the view */
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.05;
+  /* color drifts toward loss-red as drawdown deepens (fully red at DD_FULL = 15%) */
+  color: color-mix(in srgb, var(--loss) calc(var(--dd) * 100%), #f3f7fc);
+}
+
+#wealth.hi .wealth-fig {
+  color: #c9f7d9;                /* at a session high while in profit: soft green, not neon */
+}
+
+#wealth .wealth-fig.tick { animation: wealth-tick 0.08s ease-out; } /* ~80ms pulse per $1k crossing */
+@keyframes wealth-tick {
+  0% { transform: scale(1.06); } /* 6%: felt, not bouncy — the figure must stay readable at speed */
+  100% { transform: none; }
+}
+
+#wealth .wealth-delta {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 

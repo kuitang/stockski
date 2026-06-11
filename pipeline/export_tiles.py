@@ -90,6 +90,10 @@ def build_era(era: dict, order: list, data_dir: Path, out_root: Path):
     for sym in order:
         s = _load_adj_close(data_dir, sym)
         s = s[(s.index >= start) & (s.index <= end)].dropna()
+        # Nonpositive adjusted closes are vendor artifacts (QC clips them in `close` but a few
+        # survive in adjusted_close): treat as missing so the in-span ffill below repairs them —
+        # otherwise log() makes mid-lane void pinholes (false crevasses) and NaN datum offsets.
+        s = s[s > 0]
         if len(s) > 0:
             series[sym] = s
     lanes_syms = [s for s in order if s in series]

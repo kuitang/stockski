@@ -3,17 +3,29 @@
 // nodes cached once, textContent touched only when the displayed value changes.
 // Leverage ext: exposure readout is a vertical 0..W_MAX bar with a marked detent
 // line at w=1, an 'x' multiplier label, amber above 1x, pulsing red near margin call.
+// Anchor ext: the portfolio $ figure is the HUD's visual anchor — its own top-center
+// element (#wealth) with a session-P&L + gap-to-SPY delta row, an ~80ms scale pulse
+// on each $1k crossing, and a color that drifts red with drawdown from the session high.
 
 import { CFG } from './config.js';
 
 export const START_WEALTH = 100000; // plan §7 / CONTRACTS §4: portfolio starts at $100k
 export const MC_PROX = 0.8;         // u·w beyond this = margin-call proximity: at w=2 the call lands at u·w=1,
                                     // so 0.8 warns one margin-fifth before the cliff (also pulses on void lanes)
+export const PULSE_USD = 1000;      // anchor scale-pulse per $1k crossed: frequent at speed, silent when flat
+export const DD_FULL = 0.15;        // drawdown at which the $ figure is fully red: −15% = correction territory
 
 // display quantization: skip DOM writes for sub-display-precision changes
-const PCT_EPS = 0.005;   // day % and ghost gap shown to 2 dp
+const PCT_EPS = 0.005;   // day % / session P&L / ghost gap shown to 2 dp
 const W_EPS = 0.005;     // w bar/number shown to 2 dp
 const WEALTH_EPS = 0.5;  // wealth shown to whole dollars
+const DD_Q = 0.02;       // drawdown color mix written in 2% steps — finer is invisible on screen
+
+/** Red-drift mix 0..1 for the $ figure: fraction of full-red at drawdown dd from peak. Pure for tests. */
+export function ddMix(wealth, peak) {
+  if (!(peak > 0) || !(wealth < peak)) return 0;
+  return Math.min(1, (1 - wealth / peak) / DD_FULL);
+}
 
 /** Exposure-bar styling tier: '' (0..1 normal) | 'lev' (w>1, amber) | 'mc' (pulsing red:
  *  lane is void with exposure, OR u·w > MC_PROX while levered — margin-call proximity).
@@ -64,10 +76,17 @@ export class Hud {
       '<div><span class="hud-sym"></span><span class="hud-dayret pnl-flat"></span></div>' +
       '<div class="hud-name"></div>' +
       '<div class="hud-sector"></div>' +
-      '<div class="hud-date"></div>' +
-      '<div class="hud-wealth"></div>' +
-      '<div class="hud-ghostgap pnl-flat"></div>';
+      '<div class="hud-date"></div>';
     root.appendChild(hud);
+
+    // visual anchor: the portfolio $ figure, top-center, with its delta row
+    // (session P&L % vs start; gap to the SPY ghost — the scoreboard that matters)
+    const wealthEl = document.createElement('div');
+    wealthEl.id = 'wealth';
+    wealthEl.innerHTML =
+      '<div class="wealth-fig"></div>' +
+      '<div class="wealth-delta"><span class="wealth-pnl pnl-flat"></span><span class="wealth-gap pnl-flat"></span></div>';
+    root.appendChild(wealthEl);
 
     if (!document.getElementById('hud-lev-style')) {
       const style = document.createElement('style');
@@ -83,20 +102,26 @@ export class Hud {
 
     this.el = hud;
     this.expoEl = expo;
+    this.wealthEl = wealthEl;
     this._n = { // cached nodes — queried exactly once
       sym: hud.querySelector('.hud-sym'),
       dayRet: hud.querySelector('.hud-dayret'),
       name: hud.querySelector('.hud-name'),
       sector: hud.querySelector('.hud-sector'),
       date: hud.querySelector('.hud-date'),
-      wealth: hud.querySelector('.hud-wealth'),
-      ghostGap: hud.querySelector('.hud-ghostgap'),
+      wealthFig: wealthEl.querySelector('.wealth-fig'),
+      pnl: wealthEl.querySelector('.wealth-pnl'),
+      ghostGap: wealthEl.querySelector('.wealth-gap'),
       wFill: expo.querySelector('.w-fill'),
       wDetent: expo.querySelector('.w-detent'),
       wNum: expo.querySelector('.w-num'),
     };
+    this._peak = 0; // session high-water mark; first update() seeds it — drawdown drives the red drift
     // last-shown values — numbers compared before any string is built
-    this._last = { sym: null, name: null, sector: null, date: null, dayRet: NaN, w: NaN, wealth: NaN, gap: NaN, lev: '' };
+    this._last = {
+      sym: null, name: null, sector: null, date: null, dayRet: NaN,
+      w: NaN, wealth: NaN, kilo: NaN, dd: NaN, hi: false, pnl: NaN, gap: NaN, lev: '',
+    };
   }
 
   /**
@@ -141,10 +166,39 @@ export class Hud {
       last.lev = lev;
     }
 
+    // ---- $ anchor: figure, $1k pulse, drawdown color drift, delta row ----
     const wealth = info.wealth ?? START_WEALTH;
+    if (wealth > this._peak) this._peak = wealth; // session high-water mark
     if (!(Math.abs(wealth - last.wealth) < WEALTH_EPS)) {
       last.wealth = wealth;
-      n.wealth.textContent = '$' + Math.round(wealth).toLocaleString('en-US');
+      n.wealthFig.textContent = '$' + Math.round(wealth).toLocaleString('en-US');
+      const kilo = Math.floor(wealth / PULSE_USD);
+      if (!Number.isNaN(last.kilo) && kilo !== last.kilo) {
+        n.wealthFig.classList.remove('tick');
+        void n.wealthFig.offsetWidth; // restart the pulse even on back-to-back $1k crossings
+        n.wealthFig.classList.add('tick');
+      }
+      last.kilo = kilo;
+    }
+
+    // red drift with drawdown from the session high; white/green class at highs
+    const dd = Math.round(ddMix(wealth, this._peak) / DD_Q) * DD_Q;
+    if (dd !== last.dd) {
+      last.dd = dd;
+      this.wealthEl.style.setProperty('--dd', dd.toFixed(2));
+    }
+    const hi = dd === 0 && wealth > START_WEALTH; // at the session high AND in profit -> green tint
+    if (hi !== last.hi) {
+      last.hi = hi;
+      this.wealthEl.classList.toggle('hi', hi);
+    }
+
+    // session P&L %: wealth vs the $100k start (green/red)
+    const pnl = (wealth / START_WEALTH - 1) * 100;
+    if (!(Math.abs(pnl - last.pnl) < PCT_EPS)) {
+      last.pnl = pnl;
+      n.pnl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%';
+      setPnlClass(n.pnl, pnl);
     }
 
     // gap to ghost: exact wealth-ratio comparison (plan §7 "gap to ghost")

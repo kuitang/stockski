@@ -19,12 +19,13 @@ Method (PLAN paragraph 6.4 / paragraph 4.1):
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import eigsh
+from scipy.sparse import coo_matrix, csr_matrix, identity
+from scipy.sparse.linalg import LinearOperator, eigsh, lobpcg, splu
 
 CORR_WINDOW = 126     # ~6 months of daily returns: earliest window long enough for a stable corr (PLAN 6.4)
 MIN_OVERLAP = 60      # pairs sharing fewer days get no edge in W (PLAN 6.4)
@@ -33,6 +34,12 @@ MIN_RANK_OBS = 21     # >= 1 month of trading before a symbol is rankable (a 2-d
 PROXY_MIN_OVERLAP = 5 # proxy seating: 5 shared days is the floor for a correlation to even have a sign
 EIG_SIGMA = -1e-6     # shift-invert target just below 0: L is PSD, so this finds the smallest eigenpairs
 SEED = 0              # fixed eigsh starting vector -> bit-identical ordering across runs
+EIG_DENSE_MAX = 2000  # above this n the dense-as-csr shift-invert LU is effectively a dense O(n^3)
+                      # sequential factorization (the era-start cohort is a dense block); switch to the
+                      # sanctioned fallback: k-NN sparsified W + LOBPCG (task spec)
+KNN_K = 64            # k-NN sparsification degree for the large-n fallback (task spec)
+LOBPCG_TOL = 1e-8     # residual tolerance: v2/v3 angles must be stable to well below one lane
+LOBPCG_MAXITER = 200  # with the splu(L+eps I) preconditioner LOBPCG converges in O(10) iterations
 
 
 def load_era(config_path: Path, name: str) -> dict:
@@ -127,8 +134,40 @@ def pairwise_corr(R: np.ndarray):
     return rho, n
 
 
+def _knn_sparsify(W: np.ndarray, k: int = KNN_K) -> csr_matrix:
+    """Keep the k strongest edges per row, symmetrized by max (union k-NN graph)."""
+    n = W.shape[0]
+    kk = min(k, n - 1)
+    idx = np.argpartition(W, -kk, axis=1)[:, -kk:]
+    rows = np.repeat(np.arange(n), kk)
+    cols = idx.ravel()
+    vals = W[rows, cols]
+    keep = vals > 0
+    S = coo_matrix((vals[keep], (rows[keep], cols[keep])), shape=(n, n)).tocsr()
+    return S.maximum(S.T)
+
+
+def _small_eigs(L_sparse: csr_matrix, n: int, rng: np.random.Generator):
+    """3 smallest eigenpairs of sparse L via preconditioned LOBPCG (task-spec fallback);
+    eigsh shift-invert on the SPARSE L is the backstop if LOBPCG fails to converge."""
+    M = LinearOperator((n, n), matvec=splu((L_sparse + 1e-8 * identity(n)).tocsc()).solve)
+    X = rng.standard_normal((n, 6))  # extra block vectors stabilize the smallest triplet
+    X[:, 0] = 1.0                    # seed the (near-)nullspace direction explicitly
+    try:
+        vals, vecs = lobpcg(L_sparse, X, M=M, largest=False, tol=LOBPCG_TOL,
+                            maxiter=LOBPCG_MAXITER)
+        srt = np.argsort(vals)[:3]
+        return vals[srt], vecs[:, srt], "knn64+lobpcg"
+    except Exception as e:
+        print(f"note: lobpcg failed ({e}); backstop eigsh shift-invert on sparse L", flush=True)
+        v0 = rng.standard_normal(n)
+        vals, vecs = eigsh(L_sparse, k=3, sigma=EIG_SIGMA, which="LM", v0=v0)
+        srt = np.argsort(vals)
+        return vals[srt], vecs[:, srt], "knn64+eigsh_sparse"
+
+
 def spectral_circular_order(rho: np.ndarray, overlap: np.ndarray, rng: np.random.Generator):
-    """Return index order around the circle. Isolated nodes are proxy-seated afterwards."""
+    """Return (index order around the circle, eig-method note). Isolated nodes proxy-seated after."""
     n = rho.shape[0]
     valid = np.isfinite(rho) & (overlap >= MIN_OVERLAP)
     np.fill_diagonal(valid, False)
@@ -137,14 +176,25 @@ def spectral_circular_order(rho: np.ndarray, overlap: np.ndarray, rng: np.random
     has_edge = W.sum(axis=1) > 0
     core = np.flatnonzero(has_edge)
     isolated = np.flatnonzero(~has_edge)
+    eig_method = "trivial"
 
     if len(core) >= 4:  # eigsh needs k=3 < n; below that any order is trivially "circular"
         Wc = W[np.ix_(core, core)]
-        L = np.diag(Wc.sum(axis=1)) - Wc
-        v0 = rng.standard_normal(len(core))  # fixed seed -> deterministic eigenvectors
-        vals, vecs = eigsh(csr_matrix(L), k=3, sigma=EIG_SIGMA, which="LM", v0=v0)
-        srt = np.argsort(vals)
-        v2, v3 = vecs[:, srt[1]], vecs[:, srt[2]]
+        if len(core) <= EIG_DENSE_MAX:
+            L = np.diag(Wc.sum(axis=1)) - Wc
+            v0 = rng.standard_normal(len(core))  # fixed seed -> deterministic eigenvectors
+            vals, vecs = eigsh(csr_matrix(L), k=3, sigma=EIG_SIGMA, which="LM", v0=v0)
+            srt = np.argsort(vals)
+            v2, v3 = vecs[:, srt[1]], vecs[:, srt[2]]
+            eig_method = "dense_eigsh_shift_invert"
+        else:
+            S = _knn_sparsify(Wc)
+            Ls = csr_matrix(
+                coo_matrix((np.asarray(S.sum(axis=1)).ravel(),
+                            (np.arange(len(core)), np.arange(len(core)))),
+                           shape=S.shape)) - S
+            vals, vecs, eig_method = _small_eigs(Ls.tocsr(), len(core), rng)
+            v2, v3 = vecs[:, 1], vecs[:, 2]
         theta = np.arctan2(v3, v2)
         order = list(core[np.argsort(theta)])
     else:
@@ -164,7 +214,7 @@ def spectral_circular_order(rho: np.ndarray, overlap: np.ndarray, rng: np.random
         else:
             j = int(np.nanargmax(r))
             order.insert(j + 1, int(i))
-    return order
+    return order, eig_method
 
 
 def main(argv=None):
@@ -189,29 +239,41 @@ def main(argv=None):
         burnin = start
     top_n = int(era["top_n"])
 
+    t0 = time.monotonic()
+
+    def mark(stage):
+        print(f"stage: {stage} done at {time.monotonic() - t0:.1f}s", flush=True)
+
     uni = pd.read_parquet(data_dir / "universe.parquet")
     # SPY is the ghost, never a lane (PLAN 7); everything else in the universe is a candidate
     candidates = [s for s in uni["symbol"].astype(str) if s != "SPY"]
     adj_w, dv_w = load_wide_frames(data_dir, candidates, burnin, end)
+    mark(f"load_wide_frames n={adj_w.shape[1]} days={adj_w.shape[0]}")
     if adj_w.shape[1] == 0:
         print('GATE {"ok": false, "error": "no price data in era window"}')
         return 1
 
     selected = point_in_time_top_n(dv_w, start, end, top_n)
+    mark(f"point_in_time_top_n selected={len(selected)}")
+    del dv_w
     rets = earliest_return_windows(adj_w, selected)
+    mark(f"earliest_return_windows shape={rets.shape}")
+    del adj_w
     syms = list(rets.columns)
     if len(syms) == 0:
         print('GATE {"ok": false, "error": "no symbols with returns in era window"}')
         return 1
 
     rho, overlap = pairwise_corr(rets.to_numpy(dtype=np.float32))
+    mark("pairwise_corr")
     rng = np.random.default_rng(SEED)
-    order_idx = spectral_circular_order(rho, overlap, rng)
+    order_idx, eig_method = spectral_circular_order(rho, overlap, rng)
+    mark(f"spectral_circular_order method={eig_method}")
     order = [syms[i] for i in order_idx]
 
     out_path = data_dir / f"{era['name']}_order.json"
     out_path.write_text(json.dumps(order, indent=0))
-    print(f"GATE {json.dumps({'ok': True, 'era': era['name'], 'n_lanes': len(order), 'order': str(out_path)})}")
+    print(f"GATE {json.dumps({'ok': True, 'era': era['name'], 'n_lanes': len(order), 'eig': eig_method, 'seconds': round(time.monotonic() - t0, 1), 'order': str(out_path)})}")
     return 0
 
 
