@@ -310,6 +310,20 @@ async function boot() {
   document.addEventListener('visibilitychange', () => { if (document.hidden) setPaused(true); });
   renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); setPaused(true); });
 
+  // --- start box: first-run explainer + docked controls hint (? / H reopens) --------------
+  try {
+    const { initStartBox } = await import('./startbox.js');
+    initStartBox({
+      era: m.era,
+      isTouch: matchMedia('(pointer: coarse)').matches,
+      pause: () => setPaused(true),
+      resume: () => setPaused(false),
+      // automation: __ski.ready must imply a running world (CONTRACTS §4). webdriver alone is
+      // unreliable (MCP-driven Chromium reports false) — tests pass ?nointro=1 explicitly.
+      skip: navigator.webdriver === true || new URLSearchParams(location.search).has('nointro'),
+    });
+  } catch (e) { console.warn('startbox init failed:', e); }
+
   // --- debug hook (debug.js Debug class, CONTRACTS §4) -------------------------------------
   let fps = 0;
   // stable facade: debug.js holds one skier reference, but main swaps skiers on respawn/spawn

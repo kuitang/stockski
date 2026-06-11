@@ -114,6 +114,8 @@ window.__ski = {
 Determinism requirement: with `setInput` fixed and same spawn, `runScript` must produce identical logW
 across runs (fixed timestep, no Math.random in physics).
 
+Automated runs MUST load with `?nointro=1` (skips the start-box overlay, which otherwise pauses the
+world until a keypress; `navigator.webdriver` is not reliably set by MCP-driven browsers).
 Playwright acceptance (analysis/playwright/): pure-sideways path scores 0; held-lane path reproduces the
 stock's log return ±1e-6 (vs manifest-derived truth); w=0 path compounds at r_f; FPS ≥ 30 headless;
 no network request for any tile with T*TILE_DAYS > τ_max reached (causality at network layer).

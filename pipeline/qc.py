@@ -70,6 +70,12 @@ HALT_RUN_MIN = 3          # phase0 finding #5: >= 3 zero-volume flat closes = ha
 # -2.5 (-92%); terminal collapses and post-halt repricings are carved out before this.
 SPLICE_UP_LOGRET = 1.6
 SPLICE_DOWN_LOGRET = -2.5
+# Transient spike repair: a >60% jump that fully reverts within a few bars (net move from
+# the pre-spike close < 25%) is a bad print / feed glitch (observed: exact x2 or x228
+# one-or-two-bar excursions on ABK, ABN), not two real moves. The spike bars are flattened
+# to the pre-spike close instead of severing the series there.
+SPIKE_MAX_BARS = 10
+SPIKE_NET_TOL = 0.25
 UNTRADEABLE_CLOSE = 0.01  # raw close < 1 cent = sub-penny quote noise, not a tradeable print (canary only)
 # Canary robustness: a real listed stock returning > +2000% in ONE calendar year is once-a-
 # decade rare; sub-dollar quote-ladder junk does it routinely and one x700 lane shifts a
@@ -123,6 +129,27 @@ def trading_gaps(dates: np.ndarray, spy_dates: np.ndarray) -> np.ndarray:
     every era window starts >= 1999, well inside SPY (1993-)."""
     idx = np.searchsorted(spy_dates, dates)
     return np.diff(idx)
+
+
+def repair_spikes(adj: np.ndarray):
+    """Flatten transient spikes (constants above). Returns (repaired copy, repair list of
+    (start_idx, end_idx, logret)). Each repair removes >= 1 break, so the loop terminates."""
+    a = adj.copy()
+    repairs = []
+    while True:
+        lr = np.diff(np.log(a))
+        done = True
+        for i in np.flatnonzero(np.abs(lr) > BREAK_ABS_LOGRET):
+            for j in range(i + 1, min(i + 1 + SPIKE_MAX_BARS, len(a) - 1)):
+                if abs(math.log(a[j + 1] / a[i])) < SPIKE_NET_TOL:
+                    a[i + 1:j + 1] = a[i]
+                    repairs.append((int(i + 1), int(j), float(lr[i])))
+                    done = False
+                    break
+            if not done:
+                break  # recompute lr after each repair
+        if done:
+            return a, repairs
 
 
 def classify_breaks(adj: np.ndarray, vol: np.ndarray, dead: bool):
@@ -194,7 +221,7 @@ def main():
     parquet_dir = os.path.join(args.data_dir, "parquet")
 
     rows, clip_log, break_log = [], {}, {}
-    sever_log, splice_log, pin_log = [], [], {}
+    sever_log, splice_log, pin_log, spike_repair_log = [], [], {}, {}
     drops = {"no_data": [], "test_symbol": [], "insufficient_window_data": [],
              "delisted_outside_window": [], "qc_breaks": [], "dup_class": []}
     sym_years, sym_yret = {}, {}
@@ -259,6 +286,20 @@ def main():
             if k < len(df) - 1:
                 pin_log[sym] = int(len(df) - 1 - k)
                 df = df.iloc[:k + 1]
+
+        # Transient spike repair (constants above): flatten fully-reverting bad prints so a
+        # glitch pair does not sever an otherwise continuous series (e.g. ABK 2003/2009/2011).
+        if len(df) > 2:
+            a = df["adjusted_close"].to_numpy()
+            a2, repairs = repair_spikes(a)
+            if repairs:
+                dts = df["date"].to_numpy()
+                spike_repair_log[sym] = {
+                    "n": len(repairs),
+                    "sample": [{"date": str(dts[s]), "bars": e - s + 1, "logret": round(lr, 2)}
+                               for s, e, lr in repairs[:5]],
+                }
+                df = df.assign(adjusted_close=a2)
 
         # Splice severing: one-day moves no continuous company can print (constants above).
         # UP > +395%: severed regardless of class — no real resumption/repricing gains that
@@ -334,17 +375,21 @@ def main():
                      "first_date": first_date, "last_date": last_date,
                      "median_dollar_vol_63d_last": dv, "termination": termination})
 
-    # Share-class dedup: same normalized name AND overlapping spans => keep the more
-    # liquid class. Non-overlapping namesakes are temporal ticker recycling: both kept.
+    # Share-class dedup: same normalized name AND overlapping spans => keep the LONGEST
+    # span (a rename split across archive codes must keep the full-history one, e.g.
+    # JAVA_old 1997-2010 over SUNW_old 2003-07), tie-break higher dollar volume (GOOGL
+    # over GOOG). Non-overlapping namesakes are temporal ticker recycling: both kept.
     uni = pd.DataFrame(rows)
     dedup_pairs = []
     if not uni.empty:
         uni["_norm"] = uni["name"].map(normalize_name)
         drop_idx = set()
+        span = (pd.to_datetime(uni["last_date"]) - pd.to_datetime(uni["first_date"])).dt.days
+        uni["_span"] = span
         for norm, grp in uni.groupby("_norm", sort=False):
             if norm == "" or len(grp) == 1:
                 continue
-            grp = grp.sort_values("median_dollar_vol_63d_last", ascending=False)
+            grp = grp.sort_values(["_span", "median_dollar_vol_63d_last"], ascending=False)
             kept = []
             for idx in grp.index:
                 f, l = uni.at[idx, "first_date"], uni.at[idx, "last_date"]
@@ -358,7 +403,7 @@ def main():
                                         "dropped": uni.at[idx, "symbol"]})
         if drop_idx:
             drops["dup_class"] = sorted(uni.loc[sorted(drop_idx), "symbol"])
-        uni = uni.drop(index=sorted(drop_idx)).drop(columns="_norm").reset_index(drop=True)
+        uni = uni.drop(index=sorted(drop_idx)).drop(columns=["_norm", "_span"]).reset_index(drop=True)
 
     out_pq = os.path.join(args.data_dir, "universe.parquet")
     tmp = out_pq + ".tmp"
@@ -416,6 +461,7 @@ def main():
         "clipped_nonpositive_prices": clip_log,
         "reuse_severed": sever_log,
         "splice_severed": splice_log,
+        "spike_repaired": spike_repair_log,
         "stale_pin_trimmed": pin_log,
         "breaks_flagged": {k: v for k, v in sorted(break_log.items())},
         "n_break_symbols": len(break_log),
