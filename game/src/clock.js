@@ -11,8 +11,16 @@ export class WorldClock {
    * @param {string[]} [opts.dates]     manifest.dates — ISO trading calendar; defines month boundaries
    * @param {number}   [opts.startTau]  starting τ (fractional trading days)
    */
-  constructor({ daysPerSec = CFG.CLOCK_DPS, dates = [], startTau = 0 } = {}) {
-    this.daysPerSec = daysPerSec;
+  constructor({ daysPerSec, dates = [], startTau = 0 } = {}) {
+    // ERA_RUN_S: a full era plays out in ~5 real minutes regardless of its length (user spec
+    // 2026-06-11: "the whole era should finish in 5 min") — so daysPerSec scales with the era
+    // (full 6,880d ≈ 23 d/s, recent2y 523d ≈ 1.7 d/s). Explicit daysPerSec, ?dps=, or
+    // setSpeed()/__ski.setSpeed still override.
+    const ERA_RUN_S = 300;
+    const dpsParam = typeof location !== 'undefined'
+      ? parseFloat(new URLSearchParams(location.search).get('dps')) : NaN;
+    this.daysPerSec = Number.isFinite(dpsParam) && dpsParam > 0 ? dpsParam
+      : daysPerSec ?? (dates.length > 1 ? dates.length / ERA_RUN_S : CFG.CLOCK_DPS);
     this.tau = startTau;
     this.paused = false;
     this.maxTau = dates.length > 0 ? dates.length - 1 : Infinity; // clamp at era end: the future does not exist

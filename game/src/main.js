@@ -187,7 +187,8 @@ async function boot() {
   });
 
   // --- clock + spawn --------------------------------------------------------------------
-  const clock = new WorldClock({ daysPerSec: CFG.CLOCK_DPS, dates: m.dates, startTau: START_TAU });
+  // no explicit daysPerSec: WorldClock scales speed to era length (~5-min full run, user spec)
+  const clock = new WorldClock({ dates: m.dates, startTau: START_TAU });
 
   // spawn lane per task spec: highest first-day-dollar-volume symbol, lane 0 for synthetic
   const spawnLane = pickSpawnLane(m);
