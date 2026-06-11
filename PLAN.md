@@ -116,3 +116,12 @@ Phase 0 — EODHD acceptance tests (Enron/WorldCom/Lehman/Bear paths vs known hi
 Stretch: tube render; polar galaxy-map flyover; leverage w > 1; behavioral hard mode; transaction-cost drag; CRSP migration.
 
 Style rule: derive geometry and rules from the math. Every remaining magic number (k, α, θ_max, clock rate, D_kill, hover height, detent threshold) gets a one-line justification comment.
+
+## Amendments
+
+Amendment 1 (2026-06, user-decided; overrides §1 lateral lane structure). User spec, verbatim: "there should be no knife edge. You should be able to smoothly interpolate between two adjacent stocks. This is a portfolio mixture of the two. In reality you can hold many but for this dimension let's just say two. So in general display 2 tickers and your portfolio weighting unless you are on one exact track and then just show one."
+
+* α = 0.5 → 0.08. The inner plateau becomes a thin "exact track" strip at each lane center: single-stock holding (and the HUD's single-ticker state) stays achievable with finite measure, but everywhere else the surface is a smooth two-stock smoothstep mixture — the margin now spans 92% of the inter-center distance. C¹ continuity at both plateau edges holds exactly as before (the smoothstep's endpoints still have zero derivative). HUD: show both tickers + the portfolio weighting whenever u ∉ {0, 1}; one ticker only on the exact track.
+* Runtime lane width: CFG.LANE_M is settable at boot via `?lanew=` for tuning (default 4, clamped to ≥ 4 after the 2026-06 lane-width judging: w4 scored best and widths ≤ 2 retain near-vertical inter-lane walls). Heights are unchanged — only the lateral axis stretches — so lateral slopes h_s shrink by 1/LANE_M, which is the de-knifing mechanism (§3 force saturation still applies on top). Lane-space inputs (grounded steering authority/grip clamp, ghost-mode lateral thrust) scale by LANE_M so steering feels like lanes/sec, not meters/sec, at any width; the carve/skid ratio is width-invariant and grip ∝ N is preserved.
+* Mesh sampling: with a 92% margin the old 3-samples-per-lane grid would facet; margins are now sampled at 6 segments each (≥ 5 floor; even count keeps the integer-s margin midpoint a shared vertex at tile seams) so the smoothstep reads as a curve.
+* Tiles/pipeline unaffected: tiles store per-lane z, not blends; the blend lives entirely in game/src/terrain.js (and its mirrored Python reference in analysis/terrain_tests.py).

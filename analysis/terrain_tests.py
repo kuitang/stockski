@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Terrain tests on the synthetic fixture era (PLAN section 6.3) + ordering smoke test.
 
-Python REFERENCE implementation of the lane-blend height h(s) (PLAN section 1:
-plateau alpha = 0.5, smoothstep margins) and PCHIP time interpolation, then:
+Python REFERENCE implementation of the lane-blend height h(s) (PLAN section 1 as
+amended: plateau alpha = 0.08 "exact track" strip, 92% smoothstep margins) and PCHIP
+time interpolation, then:
 
   (a) crater/margin depth: blend equals k*((1-u)*z_live + u*z_dead), hand-computed values
   (b) C1 continuity at plateau/margin boundaries and across the lane 3 -> 0 wraparound seam
@@ -28,9 +29,11 @@ from scipy.interpolate import PchipInterpolator
 ROOT = Path(__file__).resolve().parent.parent
 TILES = ROOT / "game" / "public" / "tiles" / "synthetic"
 
-# Mirrors of game/src/config.js CFG (CONTRACTS section 0)
+# Mirrors of game/src/config.js CFG (CONTRACTS section 0). CFG is the single owner;
+# these are MIRRORED constants (Python cannot import ES modules) -- keep in sync by hand.
 K = 25.0          # h = K * z
-ALPHA = 0.5       # inner flat plateau fraction of lane width
+ALPHA = 0.08      # inner "exact track" plateau fraction of lane width (PLAN Amendments:
+                  # user spec "no knife edge" -- margins span 92% of inter-center distance)
 TILE_DAYS = 64
 TILE_LANES = 128
 Z_SCALE = 1000
@@ -96,16 +99,64 @@ def num_dminus(fn, s, e=DERIV_EPS):
 
 
 # --------------------------- tile decoding ---------------------------
+# Obfuscation decode (CONTRACTS section 2 "enc" v1): mirrors game/src/stream.js decodeTile —
+# XOR keystream first, then lane unshuffle (plain[r][perm[c]] = enc[r][c]). Not DRM.
+
+SEED_FALLBACK = 0x9E3779B9  # golden-ratio constant: stand-in for a zero seed (CONTRACTS 2)
+
+
+def _fnv1a(s: str) -> int:
+    h = 0x811C9DC5
+    for ch in s.encode():
+        h ^= ch
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def _xs32(x: int) -> int:
+    x = (x ^ (x << 13)) & 0xFFFFFFFF
+    x ^= x >> 17
+    x = (x ^ (x << 5)) & 0xFFFFFFFF
+    return x
+
+
+def _lane_perm(seed: int, tl: int) -> np.ndarray:
+    x = seed or SEED_FALLBACK
+    perm = np.arange(tl)
+    for i in range(tl - 1, 0, -1):  # Fisher-Yates, xorshift32-driven (CONTRACTS 2)
+        x = _xs32(x)
+        j = x % (i + 1)
+        perm[i], perm[j] = perm[j], perm[i]
+    return perm
+
+
+def _decode_enc_tile(buf: bytes, era: str, T: int, L: int, tl: int) -> np.ndarray:
+    u = np.frombuffer(buf, dtype="<u2").copy()
+    x = _fnv1a(f"{era}:{T}:{L}:carve-not-copy") or SEED_FALLBACK
+    ks = np.empty(u.size, dtype=np.uint16)
+    for i in range(u.size):
+        x = _xs32(x)
+        ks[i] = x & 0xFFFF
+    u ^= ks
+    enc = u.view(np.int16).reshape(-1, tl)
+    perm = _lane_perm(_fnv1a(f"{era}:{T}:{L}:lane-shuffle") or SEED_FALLBACK, tl)
+    out = np.empty_like(enc)
+    out[:, perm] = enc  # plain[r][perm[c]] = enc[r][c]
+    return out.reshape(-1)
+
 
 def decode_tiles(era_dir: Path):
     man = json.loads((era_dir / "manifest.json").read_text())
     nd, nl = man["nDays"], man["nLanes"]
     nt = -(-nd // man["tileDays"])
     nlt = nl // man["tileLanes"]
+    encoded = (man.get("enc") or {}).get("v") == 1
     Z = np.full((nt * man["tileDays"], nl), Z_NAN, dtype=np.int16)
     for T in range(nt):
         for L in range(nlt):
-            raw = np.fromfile(era_dir / "z" / f"t{T}_l{L}.bin", dtype="<i2")
+            buf = (era_dir / "z" / f"t{T}_l{L}.bin").read_bytes()
+            raw = (_decode_enc_tile(buf, man["era"], T, L, man["tileLanes"])
+                   if encoded else np.frombuffer(buf, dtype="<i2"))
             assert raw.size == man["tileDays"] * man["tileLanes"], "tile size mismatch"
             Z[T * man["tileDays"]:(T + 1) * man["tileDays"],
               L * man["tileLanes"]:(L + 1) * man["tileLanes"]] = raw.reshape(
@@ -125,14 +176,15 @@ def run_terrain_tests():
 
     # (a) margin/crater depth vs hand-computed values.
     # z_live = 0.1, z_dead stand-in = -3.5 (the game clamps a truly bottomless dead lane;
-    # here we verify only the blend formula). Margin between lanes 0 and 1 spans
-    # s in (0.25, 0.75); s = 0.25 + 0.5*ur.
+    # here we verify only the blend formula). With alpha = 0.08 the margin between lanes
+    # 0 and 1 spans s in (0.04, 0.96); s = 0.04 + 0.92*ur. The expected h values depend
+    # only on ur (the smoothstep argument), so they are unchanged from the alpha=0.5 era.
     zrow = np.array([0.1, -3.5, 0.2, 0.05])
     hand = [(0.25, -11.5625),   # u = 0.15625: 25*(0.84375*0.1 + 0.15625*-3.5)
             (0.50, -42.5),      # u = 0.5:     25*(0.05 - 1.75)
             (0.75, -73.4375)]   # u = 0.84375: 25*(0.15625*0.1 + 0.84375*-3.5)
     for ur, expect in hand:
-        got = height(0.25 + 0.5 * ur, zrow)
+        got = height(0.04 + 0.92 * ur, zrow)
         check(f"(a) margin depth ur={ur}", abs(got - expect) < 1e-12, f"{got} vs {expect}")
 
     # (b) C1 continuity: numerical one-sided derivatives agree at every
@@ -141,7 +193,8 @@ def run_terrain_tests():
     rows = {"hand": zrow, "day200": Zt[day, :]}
     for label, row in rows.items():
         fn = lambda s: height(s, row)
-        boundaries = [0.25, 0.75, 1.25, 3.25, 3.75, 4.0]  # 4.0 == 0.0: the wraparound seam
+        # plateau edges at i +- alpha/2 = i +- 0.04; 4.0 == 0.0: the wraparound seam
+        boundaries = [0.04, 0.96, 1.04, 3.04, 3.96, 4.0]
         for b in boundaries:
             dp, dm = num_dplus(fn, b), num_dminus(fn, b)
             check(f"(b) C1 at s={b} [{label}]", abs(dp - dm) < C1_TOL, f"jump={abs(dp-dm):.2e}")

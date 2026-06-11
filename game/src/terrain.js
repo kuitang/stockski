@@ -7,8 +7,17 @@ import { CFG } from './config.js';
 import { PREFETCH_DAYS, VIEW_LANES } from './stream.js';
 import { SNOW_TEX_TILE_M } from './visuals.js';
 
-const A2 = CFG.ALPHA_PLATEAU / 2;     // plateau half-width in lane units (plan §1)
+const A2 = CFG.ALPHA_PLATEAU / 2;     // plateau half-width in lane units (plan §1, amended α = 0.08)
 const MARGIN = 1 - CFG.ALPHA_PLATEAU; // margin width between adjacent plateaus in lane units
+
+// Margin mesh sampling: at α = 0.08 the smoothstep margin spans 92% of the inter-center
+// distance — the old 3-samples-per-lane grid would render it as 2 flat facets, not a curve.
+// 3 segments per HALF-margin ⇒ 6 per full margin (≥ 5 per spec): worst-case chord error of
+// piecewise-linear smoothstep is h²/8·max|u″| = (1/6)²/8·6 ≈ 2.1% of the inter-lane height
+// step — sub-pixel at gameplay camera distances. An even per-margin count keeps the integer-s
+// margin midpoint a shared vertex, so lane-tile seams stay watertight.
+const MARGIN_HALF_SEGS = 3;
+const SPL = 2 * MARGIN_HALF_SEGS + 1; // lateral samples per lane cell (midpoint→edge→edge→…)
 
 /**
  * CONTRACTS §3: height + analytic partials at lateral s (m), fractional day dayF.
@@ -47,9 +56,10 @@ export function heightAt(s, dayF, stream) {
 
 /**
  * One THREE.BufferGeometry per (time-tile, lane-tile). Vertex grid: integer days ×
- * 3 lateral samples per lane (margin midpoint + both plateau edges — the minimum that
- * renders plateau/margin exactly, since plateaus are flat and the margin midpoint pins
- * the smoothstep's center). Void = skipped triangles. Day strips are revealed by
+ * SPL lateral samples per lane (margin midpoint, MARGIN_HALF_SEGS−1 interior samples per
+ * half-margin, both plateau edges — plateaus are flat so one segment suffices there, while
+ * the wide smoothstep margins get ≥ 5 segments each and read as curves, not facets).
+ * Void = skipped triangles. Day strips are revealed by
  * drawRange as τ advances; the snow shader additionally discards fragments at z < −τ
  * so the visible snow edge is EXACTLY the frontier.
  */
@@ -141,12 +151,18 @@ export class TerrainTiles {
     const rows = endDay - startDay + 1;
     if (rows < 2) return;
     const lane0 = L * tl;
-    const W = 3 * tl + 1; // 3 samples/lane + trailing margin midpoint shared with the next lane-tile
+    const W = SPL * tl + 1; // SPL samples/lane + trailing margin midpoint shared with the next lane-tile
     const xs = new Float64Array(W);
+    const hStep = MARGIN / 2 / MARGIN_HALF_SEGS; // lateral step inside each half-margin (lane units)
     for (let l = 0; l < tl; l++) {
-      xs[3 * l] = lane0 + l;              // margin midpoint (u = 0.5 between lanes l−1 and l)
-      xs[3 * l + 1] = lane0 + l + 0.5 - A2; // left plateau edge of lane l
-      xs[3 * l + 2] = lane0 + l + 0.5 + A2; // right plateau edge of lane l
+      const base = SPL * l;
+      const x0 = lane0 + l; // margin midpoint (u = 0.5 between lanes l−1 and l)
+      // midpoint → left plateau edge of lane l (k = MARGIN_HALF_SEGS lands exactly on 0.5 − A2)
+      for (let k = 0; k <= MARGIN_HALF_SEGS; k++) xs[base + k] = x0 + k * hStep;
+      xs[base + MARGIN_HALF_SEGS + 1] = x0 + 0.5 + A2; // right plateau edge (plateau is flat: 1 segment)
+      // right plateau edge → next margin midpoint (interior samples only; midpoint owned by lane l+1)
+      for (let k = 1; k < MARGIN_HALF_SEGS; k++)
+        xs[base + MARGIN_HALF_SEGS + 1 + k] = x0 + 0.5 + A2 + k * hStep;
     }
     xs[W - 1] = lane0 + tl;
 
@@ -162,8 +178,10 @@ export class TerrainTiles {
         pos[3 * k] = xs[c] * CFG.LANE_M;
         pos[3 * k + 1] = bad ? 0 : q.h; // parked at 0, never referenced by an index (keeps normals/bounds finite)
         pos[3 * k + 2] = -day * CFG.DAY_M; // CONTRACTS §3: world z = −day
-        // pre-translation (s, −day) coords: wraparound parking moves meshes by span = nLanes·LANE_M,
-        // a multiple of TILE_LANES = 128 m, i.e. an integer number of 4 m texture repeats — seam-safe
+        // pre-translation (s, −day) coords: wraparound parking moves meshes by span = nLanes·LANE_M;
+        // at default LANE_M = 1 that's a multiple of TILE_LANES = 128 m, i.e. an integer number of
+        // 4 m texture repeats — seam-safe. A non-integer ?lanew= can phase-shift the snow texture
+        // at the wrap seam: cosmetic only, accepted for the lane-width experiment.
         uv[2 * k] = pos[3 * k] / SNOW_TEX_TILE_M;
         uv[2 * k + 1] = pos[3 * k + 2] / SNOW_TEX_TILE_M;
         if (bad) voidMask[k] = 1;

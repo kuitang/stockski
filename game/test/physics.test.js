@@ -8,10 +8,11 @@ import { exposureLevel, fmtW, MC_PROX } from '../src/hud.js';
 
 const DT = 1 / CFG.PHYS_HZ; // fixed 120 Hz timestep (plan §3)
 const DPS = CFG.CLOCK_DPS;  // 2 trading days / sec (plan §0)
+const L = CFG.LANE_M;       // lane-unit spawn positions → meters: tests hold at ANY shipped width
 
 /**
  * Analytic mock world: closed-form h(s, day) and per-lane rates.
- * Lanes are 1 m wide (CFG.LANE_M); u = 0 everywhere (plateau) unless overridden.
+ * Lanes are CFG.LANE_M wide; u = 0 everywhere (plateau) unless overridden.
  */
 function makeWorld({ h = () => 0, rate = () => 0, rf = 0, voidLanes = [] } = {}) {
   const dead = new Set(voidLanes);
@@ -58,7 +59,7 @@ describe('portfolio identity (PLAN §2.1)', () => {
       rf: 0.1, // nonzero r_f: must not leak in at w = 1
     });
     const D = 10;
-    const sk = new Skier(world, { s0: 3.5, day0: 0, w0: 1 }); // plateau center of lane 3
+    const sk = new Skier(world, { s0: 3.5 * L, day0: 0, w0: 1 }); // plateau center of lane 3
     let st;
     for (let i = 0; i < stepsForDays(D); i++) st = sk.step(DT, { steer: 0, wTarget: 1 });
     expect(st.lane).toBe(3);
@@ -121,7 +122,8 @@ describe('exposure scaling and forces (PLAN §3)', () => {
     const full = new Skier(world, { s0: 0.5, w0: 1 });
     const b = full.step(DT, { steer: 1, wTarget: 1 });
     expect(b.skidding).toBe(false); // demand exactly meets grip at w = 1 on flat
-    expect(b.steerForce).toBeCloseTo(PHYS.MU_EDGE * PHYS.MASS * PHYS.G, 12);
+    // ×LANE_M: demand and grip are lane-space quantities (physics.js scales both by LANE_M)
+    expect(b.steerForce).toBeCloseTo(PHYS.MU_EDGE * PHYS.MASS * PHYS.G * L, 12);
   });
 });
 
@@ -142,7 +144,7 @@ describe('w dial detent (PLAN §3)', () => {
 describe('void, death and recovery (PLAN §2.3/§3)', () => {
   it('§3: w = 1 on a void lane falls, dies below the live-neighbor floor − D_KILL, wealth is lost', () => {
     const world = makeWorld({ h: () => 0, rate: () => 0.01, rf: 0.05, voidLanes: [5] });
-    const sk = new Skier(world, { s0: 5.5, day0: 0, w0: 1 });
+    const sk = new Skier(world, { s0: 5.5 * L, day0: 0, w0: 1 });
     let st;
     for (let i = 0; i < 600 && !sk.dead; i++) st = sk.step(DT, { steer: 0, wTarget: 1 });
     expect(st.dead).toBe(true);
@@ -153,7 +155,7 @@ describe('void, death and recovery (PLAN §2.3/§3)', () => {
 
   it('§3: 0 < w < 1 on void floats — slow sink, no death, recoverable via w → 0', () => {
     const world = makeWorld({ h: () => 0, rf: 0, voidLanes: [5] });
-    const sk = new Skier(world, { s0: 5.5, day0: 0, w0: 0.5 });
+    const sk = new Skier(world, { s0: 5.5 * L, day0: 0, w0: 0.5 });
     let st;
     for (let i = 0; i < 600; i++) st = sk.step(DT, { steer: 0, wTarget: 0.5 });
     st = sk.step(DT, { steer: 0, wTarget: 0.5 });
@@ -218,7 +220,7 @@ describe('leverage w > 1, capped at W_MAX = 2 (PLAN §2/§3 ext: stretch goal pu
     const R = 0.001, RF = 0.04;
     const world = makeWorld({ h: () => 0, rate: (lane) => (lane === 3 ? R : 0.07), rf: RF });
     const D = 10;
-    const sk = new Skier(world, { s0: 3.5, day0: 0, w0: 2 });
+    const sk = new Skier(world, { s0: 3.5 * L, day0: 0, w0: 2 });
     let st;
     for (let i = 0; i < stepsForDays(D); i++) st = sk.step(DT, { steer: 0, wTarget: 2 });
     expect(st.lane).toBe(3);
@@ -281,7 +283,7 @@ describe('leverage w > 1, capped at W_MAX = 2 (PLAN §2/§3 ext: stretch goal pu
 
   it('§2 ext: w = 2 wholly on a void plateau margin-calls instantly (w = 1 keeps the crevasse fall)', () => {
     const world = makeWorld({ h: () => 0, voidLanes: [5] });
-    const sk = new Skier(world, { s0: 5.5, day0: 0, w0: 2 });
+    const sk = new Skier(world, { s0: 5.5 * L, day0: 0, w0: 2 });
     const st = sk.step(DT, { steer: 0, wTarget: 2 });
     expect(st.dead).toBe(true); // broker liquidates before the crater bottoms out
     expect(st.deathCause).toBe('margin-call');

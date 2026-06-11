@@ -21,7 +21,9 @@ describe('terrain (lane,u) matches the physics blend convention (PLAN §2.1)', (
   const blend = (q) => (1 - q.u) * q.lane + q.u * (q.lane + 1); // physics' effective lane level
 
   it('left half of a plateau reports (i, u=1): all weight on lane i+1, h consistent', () => {
-    const q = heightAt(4.3, 0, stream); // inside lane 4's inner plateau, left half
+    // α = 0.08: lane 4's exact-track plateau spans [4.46, 4.54] lane units; 4.47 is its left
+    // half (×LANE_M → meters, so the test holds at any shipped lane width)
+    const q = heightAt(4.47 * CFG.LANE_M, 0, stream);
     expect(q.lane).toBe(3);
     expect(q.u).toBe(1);
     expect(blend(q)).toBeCloseTo(4, 12);          // 100% lane 4 — the plateau the skier stands on

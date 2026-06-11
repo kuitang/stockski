@@ -5,6 +5,7 @@
 import { Text } from 'troika-three-text'; // troika Texts are THREE.Object3D
 import { Vector3 } from 'three';          // NDC projection for the HUD-zone fade
 import { CFG } from './config.js';
+import { sharedStorm } from './cameras.js'; // smoothed storm 0..1: luminance-aware label color
 
 export const POOL_SIZE = 24;   // 15 near full-detail + 9 mid ticker-only ring (plan §7 frontier slice)
 export const NEAR_LANES = 15;  // nearest ~15 lanes get "TICK +1.2%" (plan §7)
@@ -15,6 +16,8 @@ const MID_FONT_M = 0.6;        // smaller mid-ring type = built-in LOD cue
 // label, so a fixed world font rendered hundreds of px tall and occluded both the slope and
 // the top-center $ readout. Clamp + fade are CAMERA-DISTANCE driven, so every rig is covered.
 const MAX_ANG_RAD = 0.05;      // max label height ≈ 2.9° of view (~5% of a 60° frame): never dominates
+const MIN_ANG_RAD = 0.018;     // min glyph size ≈ 1.0° ≈ 17 px tall at 1080p/60° (lane-width judging:
+                               // the old 12 px floor left far red tickers illegible mush on the dusk sky)
 const FADE_NEAR_M = 8;         // labels fully gone inside 8 m — the skier's own lane never blocks the view
 const FADE_FULL_M = 28;        // full opacity by ~28 m (≈ chase-cam label distance): far ring unaffected
 const FONT_Q = 0.05;           // fontSize quantum (m): clamping re-syncs troika layout only on real steps
@@ -49,6 +52,19 @@ export function labelColor(dayRet) {
   return dayRet > 0 ? COLOR_POS : COLOR_NEG;
 }
 
+// Luminance compensation (carryover #4): as the storm grays/darkens the sky and fog, the
+// mid-value green/red fills lose contrast against the dimmed backdrop — lift them toward
+// white with the storm driver. 0.55 max: at full storm the hue still reads, just brighter.
+const STORM_BRIGHT_MAX = 0.55;
+const STORM_Q = 0.25; // storm quantum: color (a troika re-sync) changes at most 4 steps over a storm
+
+/** Pure: hex color lerped toward white by k (0..1). Exported for tests. */
+export function brightenColor(hex, k) {
+  const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
+  const up = (c) => Math.min(255, Math.round(c + (255 - c) * k));
+  return (up(r) << 16) | (up(g) << 8) | up(b);
+}
+
 /** Pure: visit lane offsets nearest-first: 0, -1, +1, -2, +2, ... */
 export function laneOffset(rank) {
   return rank === 0 ? 0 : (rank % 2 === 1 ? -((rank + 1) >> 1) : rank >> 1);
@@ -78,8 +94,11 @@ export class Labels {
       t.anchorX = 'center';
       t.anchorY = 'bottom';
       t.color = COLOR_FLAT;
-      t.outlineWidth = '6%';      // thin dark outline keeps SDF text legible over white snow
+      t.outlineWidth = '12%';     // dark outline keeps SDF text legible over snow AND dusk sky (lane-width
+                                  // judging: 8% was not enough contrast for far red tickers)
       t.outlineColor = 0x0a101a;
+      t.outlineBlur = '4%';       // tighter halo than before (was 6%): a harder rim carries more contrast
+                                  // at the far ring's small glyph sizes; still reads as a pocket, not a sticker
       t.visible = false;
       t.frustumCulled = false;    // labels hug the frontier curtain; culling thrashes at the edge
       scene.add(t);
@@ -99,6 +118,8 @@ export class Labels {
     this._box.n = 0; // overlap-culling accept list resets every frame
     const tanHalf = this.camera ? Math.tan((this.camera.fov * Math.PI) / 360) : 1;
     const aspect = this.camera?.aspect || 1;
+    // storm luminance compensation, quantized so troika color syncs only on real steps
+    const stormK = Math.round((sharedStorm() * STORM_BRIGHT_MAX) / (STORM_Q * STORM_BRIGHT_MAX)) * (STORM_Q * STORM_BRIGHT_MAX);
     for (let rank = 0; rank < POOL_SIZE; rank++) {
       const t = this.pool[rank];
       const lane = (((center + laneOffset(rank)) % nLanes) + nLanes) % nLanes;
@@ -110,15 +131,17 @@ export class Labels {
       }
       const cache = this._shown[rank];
       const txt = labelText(meta.sym, info.dayRet, rank);
-      const col = labelColor(info.dayRet);
+      // luminance-aware fill (carryover #4): brighter as the storm darkens the sky behind it
+      const col = stormK > 0 ? brightenColor(labelColor(info.dayRet), stormK) : labelColor(info.dayRet);
       let font = rank < NEAR_LANES ? NEAR_FONT_M : MID_FONT_M;
       let opa = 1;
       t.position.set(info.x, info.y + LABEL_LIFT_M, info.z);
       if (this.camera) {
         const cam = this.camera;
         const dist = t.position.distanceTo(cam.position);
-        // screen-space size clamp: world font shrinks so the label never exceeds MAX_ANG_RAD
-        font = Math.min(font, dist * MAX_ANG_RAD);
+        // screen-space size clamp: world font shrinks so the label never exceeds MAX_ANG_RAD,
+        // and GROWS so it never drops below the MIN_ANG_RAD legibility floor (carryover #4)
+        font = Math.min(Math.max(font, dist * MIN_ANG_RAD), dist * MAX_ANG_RAD);
         font = Math.max(FONT_Q, Math.round(font / FONT_Q) * FONT_Q); // quantize: sync only on real steps
         // near-camera fade: a label about to fill the frame dissolves instead (fp/shoulder fix)
         opa = Math.min(Math.max((dist - FADE_NEAR_M) / (FADE_FULL_M - FADE_NEAR_M), 0), 1);

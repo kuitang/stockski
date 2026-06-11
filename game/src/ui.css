@@ -65,6 +65,22 @@ canvas {
   letter-spacing: 0.02em;
 }
 
+#hud .hud-sym {
+  font-variant-numeric: tabular-nums; /* the position line carries live % weights: no digit jitter */
+}
+
+#hud .hud-cash {
+  font-size: 12px;                /* cash/borrow tail one step under the ticker weights: context, not holding */
+  font-weight: 600;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+#hud .hud-cash.borrow {
+  color: #fbbf24;                 /* amber = borrowed money, matches the exposure bar's lev tier (hud.js) */
+  opacity: 1;
+}
+
 #hud .hud-dayret {
   font-size: 15px;               /* day % stays legible but secondary (one step under the ticker) */
   font-weight: 700;

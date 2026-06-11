@@ -115,8 +115,9 @@ describe('Input.poll keyboard integration (no DOM: synthetic key events)', () =>
 
 describe('carveColor', () => {
   it('maps dlogW sign to green/red/white', () => {
-    expect(carveColor(0.01)).toEqual([0.29, 0.87, 0.5]);
-    expect(carveColor(-0.01)).toEqual([0.97, 0.44, 0.44]);
+    // polish carryover #3: saturated signal green/red (carve.js POS_RGB/NEG_RGB)
+    expect(carveColor(0.01)).toEqual([0.05, 0.8, 0.3]);
+    expect(carveColor(-0.01)).toEqual([0.95, 0.2, 0.2]);
     expect(carveColor(0)).toEqual([1, 1, 1]);
   });
 });

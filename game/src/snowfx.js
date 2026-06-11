@@ -20,7 +20,13 @@
 import * as THREE from 'three';
 
 const MAX_PARTICLES = 3600; // raised from 2500 (judge r2: storm barely denser than calm): tiny alpha-tested points — vertex cost only
-const AMBIENT_FRACTION = 0.10; // intensity 0: sparse ambient flurry (lowered with the higher cap: calm count ≈ unchanged, storm 10x denser)
+// Ski spray (carryover #6): the FIRST 4% of the rank order (144 particles) is SUB-ALLOCATED as a
+// speed-scaled powder burst at the ski/terrain contact — same buffer, same draw call, no second system
+const SPRAY_FRACTION = 0.04;
+const AMBIENT_FRACTION = 0.14; // calm ambient = ranks (0.04, 0.14]: same ~10% flurry count as before the spray sub-allocation
+const SOFT_FLAKE_FRAC = 0.015; // ~1.5% of flakes are LARGE SOFT near-camera bokeh flakes (carryover #8): a few, never a wall
+const SOFT_SIZE_MULT = 3.0;    // soft flakes ~3x diameter: close ones read as out-of-focus foreground depth
+const SOFT_ALPHA_MULT = 0.45;  // and ~half alpha: airy bokeh, not white blobs
 const STORM_SIZE_GAIN = 0.5;   // storm flakes up to +50% diameter: density AND mass read in one frame (judge r2)
 const FALL_CALM_MS = 1.3;   // m/s: big flakes settling on a windless day
 const FALL_STORM_MS = 7.5;  // m/s: driven snow — fast enough to streak at 60 fps
@@ -43,6 +49,8 @@ export class SnowFX {
     this._fall = 0;            // CPU-integrated fall distance: speed changes stay continuous
     this._windOfs = 0;         // CPU-integrated wind displacement: wind changes stay continuous
     this._time = 0;
+    this._sprayOn = 0;         // ski/terrain contact gate (setSprayOrigin): 0 airborne, 1 grounded
+    this._spray = 0;           // smoothed spray strength = contact × speed01 (update())
 
     const seeds = new Float32Array(MAX_PARTICLES * 3);
     const rand = new Float32Array(MAX_PARTICLES);
@@ -69,6 +77,8 @@ export class SnowFX {
       uCenter: { value: new THREE.Vector3() },
       uVol: { value: new THREE.Vector3(VOL.x, VOL.y, VOL.z) },
       uIntensity: { value: 0 },
+      uSpray: { value: 0 },                        // smoothed spray strength 0..1 (contact × speed)
+      uSprayPos: { value: new THREE.Vector3() },   // ski/terrain contact point (world)
       uStreak: { value: 0 },                       // streak amount: max(storm ramp, speed cue)
       uStreakDir: { value: new THREE.Vector2(0, 1) }, // flake motion dir in sprite space (y = screen-down)
       // px-per-meter-at-1m: viewportHalfHeightPx / tan(FOV/2); 60° FOV per CFG.CAM — recomputed on resize
@@ -90,20 +100,48 @@ export class SnowFX {
       vertexShader: /* glsl */ `
         attribute vec3 aSeed;
         attribute float aRand;
-        uniform float uTime, uFall, uWindOfs, uIntensity, uScale, uStreak;
-        uniform vec3 uCenter, uVol;
+        uniform float uTime, uFall, uWindOfs, uIntensity, uScale, uStreak, uSpray;
+        uniform vec3 uCenter, uVol, uSprayPos;
         varying float vAlpha;
         varying float vStreak;
+        varying float vSoft;
         void main() {
-          // alive fraction ramps 15% -> 100% with intensity (contract above)
+          // --- spray sub-pool (carryover #6): ranks below SPRAY_FRACTION are a powder burst
+          // at the ski/terrain contact, alive only while grounded AND moving (uSpray > 0)
+          if (aRand < ${SPRAY_FRACTION.toFixed(3)}) {
+            if (uSpray < 0.03) { // parked/airborne: spray pool clipped for free
+              gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+              gl_PointSize = 0.0;
+              vAlpha = 0.0; vStreak = 0.0; vSoft = 0.0;
+              return;
+            }
+            // each particle loops its own ~0.36 s life (2.8 Hz), phase-spread by rank
+            float life = fract(uTime * 2.8 + aRand * 731.7);
+            // kick cone: lateral spread, up, and BACKWARD (+z — travel is −z): powder thrown off the tails
+            vec3 dir = vec3((aSeed.x - 0.5) * 1.6, 0.5 + 0.9 * aSeed.y, 0.4 + 0.9 * aSeed.z);
+            // ~1 m reach over a life at full speed: a rooster tail at the skis, not a smoke machine
+            vec3 p = uSprayPos + dir * (2.8 * uSpray) * life;
+            p.y -= 3.5 * life * life; // ballistic droop: kicked powder falls right back out
+            vAlpha = uSpray * (1.0 - life) * 0.85; // fades over the life; 0.85 peak = bright fresh powder
+            vStreak = 0.0; vSoft = 0.0;            // round puffs: spray is powder, not wind streaks
+            vec4 mv = modelViewMatrix * vec4(p, 1.0);
+            gl_Position = projectionMatrix * mv;
+            float size = 0.05 + 0.16 * life; // the puff EXPANDS as it dissipates (powder bloom)
+            gl_PointSize = clamp(uScale * size / max(-mv.z, 0.5), 1.0, 24.0); // 24 px: near-ski puffs read, never blobs
+            return;
+          }
+          // alive fraction ramps with intensity (contract above); spray ranks excluded
           if (aRand > mix(${AMBIENT_FRACTION.toFixed(3)}, 1.0, uIntensity)) {
             gl_Position = vec4(0.0, 0.0, 2.0, 1.0); // clipped: dead flakes cost nothing
             gl_PointSize = 0.0;
-            vAlpha = 0.0; vStreak = 0.0;
+            vAlpha = 0.0; vStreak = 0.0; vSoft = 0.0;
             return;
           }
           float r1 = fract(aRand * 7.31);  // decorrelated per-flake variates from the rank
           float r2 = fract(aRand * 3.77);
+          float r3 = fract(aRand * 13.91); // soft-flake lottery + per-flake opacity variate
+          // a few large soft "near-camera" flakes (carryover #8): out-of-focus foreground depth
+          vSoft = step(${(1 - SOFT_FLAKE_FRAC).toFixed(3)}, r3);
           // fall: shared integral (continuous under speed changes) x ±35% per-flake variation
           float fall = uFall * (0.65 + 0.7 * r1);
           // flutter: pure displacement (not integrated) so it never drifts; bigger in a storm
@@ -117,20 +155,26 @@ export class SnowFX {
           // soft edges: fade the outer 30% of the volume so wrap boundaries never pop
           vAlpha = (1.0 - smoothstep(0.35, 0.5, abs(rel.x)))
                  * (1.0 - smoothstep(0.35, 0.5, abs(rel.z)))
-                 * (0.55 + 0.45 * uIntensity); // calm flakes are wispier than storm flakes
-          vStreak = uStreak; // storm ramp OR skier-speed cue (max), computed CPU-side per frame
+                 * (0.55 + 0.45 * uIntensity) // calm flakes are wispier than storm flakes
+                 * mix(0.6, 1.0, fract(aRand * 9.13)) // per-flake opacity spread (carryover #8): a field, not a stamp
+                 * mix(1.0, ${SOFT_ALPHA_MULT.toFixed(2)}, vSoft); // big soft flakes are airy, not white blobs
+          vStreak = uStreak * (1.0 - vSoft); // bokeh flakes never streak: they read as near-field focus depth
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
           gl_Position = projectionMatrix * mv;
           // 0.5+1.0·r2: wide per-flake size spread — with the perspective divide below, depth
           // reads as a size gradient instead of uniform hard dots (judge r1)
           float size = ${FLAKE_M.toFixed(3)} * (0.5 + 1.0 * r2)
             * (1.0 + ${STORM_SIZE_GAIN.toFixed(2)} * uIntensity) // storm flakes are bigger, not just more (judge r2)
-            * (1.0 + 1.5 * vStreak); // streaking flakes elongate into wind streaks (the frag shader thins them)
-          gl_PointSize = clamp(uScale * size / max(-mv.z, 0.5), 1.0, 18.0); // 18 px cap: a streaked near flake reads as a dash, not a blob
+            * (1.0 + 1.5 * vStreak)  // streaking flakes elongate into wind streaks (the frag shader thins them)
+            * mix(1.0, ${SOFT_SIZE_MULT.toFixed(1)}, vSoft); // soft-flake diameter (carryover #8)
+          // px caps: 18 px for crisp flakes (a streaked near flake reads as a dash, not a blob);
+          // soft bokeh flakes may reach 52 px ≈ 5% of frame height — foreground, still not a wall
+          gl_PointSize = clamp(uScale * size / max(-mv.z, 0.5), 1.0, mix(18.0, 52.0, vSoft));
         }`,
       fragmentShader: /* glsl */ `
         varying float vAlpha;
         varying float vStreak;
+        varying float vSoft;
         uniform vec2 uStreakDir;
         void main() {
           vec2 pc = gl_PointCoord * 2.0 - 1.0;
@@ -142,7 +186,10 @@ export class SnowFX {
           float r2 = along * along + perp * perp;
           if (r2 > 1.0 || vAlpha < 0.01) discard; // alpha-tested round sprite (task spec)
           float soft = 1.0 - r2;
-          gl_FragColor = vec4(vec3(1.0), vAlpha * soft * soft); // quadratic falloff: soft flake, no hard rim
+          // bokeh flakes get a cubic falloff: a wider feathered fringe (carryover #8), crisp
+          // flakes keep the quadratic — soft flake, no hard rim either way
+          float fall = soft * soft * mix(1.0, soft, vSoft);
+          gl_FragColor = vec4(vec3(1.0), vAlpha * fall);
         }`,
     });
     this.points = new THREE.Points(geo, material);
@@ -169,6 +216,13 @@ export class SnowFX {
     this.speed01 = Math.min(v / SPEED_REF_MS, 1);
   }
 
+  /** Ski/terrain contact for the spray burst (carryover #6): pos = contact point (world),
+   *  on01 = 1 grounded / 0 airborne. Strength rendered = on01 × speed01, smoothed in update(). */
+  setSprayOrigin(pos, on01) {
+    if (pos) this.uniforms.uSprayPos.value.set(pos.x, pos.y, pos.z);
+    this._sprayOn = Number.isFinite(on01) ? Math.min(Math.max(on01, 0), 1) : 0;
+  }
+
   /**
    * @param {number} dt seconds since last frame
    * @param {{x:number,y:number,z:number}} center anchor (skier/camera neighborhood)
@@ -184,11 +238,16 @@ export class SnowFX {
       * (1 + SPEED_FALL_BOOST * this.speed01); // speed boost: flakes rush past a fast skier
     this._fall += dt * fallMS;
     this._windOfs += dt * this.windX;
+    // spray strength = contact × speed, smoothed at ~0.12 s so chattery ground contact breathes
+    // instead of strobing the burst (fast enough that landings still read as an impact puff)
+    const sprayWant = this._sprayOn * this.speed01;
+    this._spray += (sprayWant - this._spray) * (1 - Math.exp(-Math.max(dt, 0) / 0.12));
     const u = this.uniforms;
     u.uTime.value = this._time;
     u.uFall.value = this._fall;
     u.uWindOfs.value = this._windOfs;
     u.uIntensity.value = this.intensity;
+    u.uSpray.value = this._spray;
     // streak amount: storm ramp OR the speed cue, whichever wins. Onset 0.15 (was 0.3, judge r2:
     // a 47%-drawdown blizzard rendered as static dots): any real storm now leans into streaks
     const stormStreak = this.intensity * (this.intensity < 0.15 ? 0 :

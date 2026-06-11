@@ -203,6 +203,7 @@ export class Frontier {
   constructor(scene, snowUniforms = null, heightProbe = null) {
     this.scene = scene;
     this.snowUniforms = snowUniforms;
+    this._probe = heightProbe; // also drives the ski-spray contact test (carryover #6)
     this.ridges = heightProbe ? new RidgeGhosts(scene, heightProbe) : null;
     this.geometry = new THREE.PlaneGeometry(CURTAIN_W, CURTAIN_H);
     this.veil = new THREE.Mesh(this.geometry, makeVeilMaterial());
@@ -238,6 +239,15 @@ export class Frontier {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const dt = this._lastNow === null ? 0 : Math.min((now - this._lastNow) / 1000, 0.25); // clamp tab-switch hitches
     this._lastNow = now;
+    // ski spray contact (carryover #6): grounded ⇔ the skier sits within 0.6 m of the snow
+    // under them (covers the physics ground clamp + carve lift); void (NaN) or a w→0 float
+    // reads as airborne and the burst dies. Strength itself is speed-scaled inside snowfx.
+    if (this._probe) {
+      const h = this._probe(x, tau);
+      const grounded = Number.isFinite(h) && y - h < 0.6 ? 1 : 0;
+      // origin 0.4 m behind the frontier pin: powder kicks off the ski TAILS, not the tips
+      this.snow.setSprayOrigin({ x, y: grounded ? h : y, z: z + 0.4 }, grounded);
+    }
     this.snow.update(dt, { x, y: y + SNOW_ANCHOR_UP, z: z - SNOW_ANCHOR_AHEAD });
     this.ridges?.update(tau, x, this.snow.intensity); // storm-gated escape-lane silhouettes
     // aerial perspective ↔ storm: fog color rides the SAME smoothed intensity as the flakes,

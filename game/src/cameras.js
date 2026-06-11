@@ -31,6 +31,16 @@ export const CAM_MODES = ['chase', 'drone', 'fp', 'shoulder'];
 // Judge verdict (medians chase 6 / drone 6 / fp 6 / shoulder 7): shoulder ships as the default rig.
 export const DEFAULT_CAM = 'shoulder';
 
+// Shared per-frame view state for sibling VISUAL modules (carve.js fp fade, labels.js storm
+// brightness). main.js already feeds the rig (setMode/setStorm); mirroring those two scalars
+// at module level lets visual polish read them without widening any integrator contract.
+let _activeMode = DEFAULT_CAM;
+let _sharedStorm = 0;
+/** Active camera rig name ('chase'|'drone'|'fp'|'shoulder') — carve.js fades its ribbon in fp. */
+export function activeCamMode() { return _activeMode; }
+/** Smoothed storm intensity 0..1 (last rig.setStorm value) — labels.js luminance compensation. */
+export function sharedStorm() { return _sharedStorm; }
+
 const DRONE = {
   FOV: 55,    // narrower than chase (60): flattens perspective so lanes read as a market map, not a canyon
   BACK: 26,   // m behind (was 60): judge r2 — edge-on sliver between empty bands; closer = terrain owns the frame
@@ -94,26 +104,26 @@ const LOS = {
 // accidental drone and the skier reads as a speck — the x-ray ghost owns deeper occlusions.
 const RAISE_CAP = 34;
 
-// FOV speed kick (judge r2: frozen frames carry zero speed read): widen the lens with speed —
-// the standard cheap velocity cue. Applied to chase/shoulder/fp; the drone is a static overview.
+// FOV speed kick (judge r2 + polish carryover #6): widen the lens with speed — the standard
+// cheap velocity cue. Chase/shoulder only: the drone is a static overview, and fp already
+// carries roll + shake (an fp FOV pump on top risks motion sickness).
 const FOV_KICK = {
-  DEG: 8,       // max extra degrees: felt as rush, below fisheye territory on a 60–75° base
+  DEG: 5,       // max extra degrees at vmax (judge-accepted ~+5°): felt as rush, far below fisheye
   REF_MS: 14,   // m/s for the full kick: a hard carve (vs ≈ 10) plus clock-forward motion
   DAMP: 0.05,   // per-second residual: the lens breathes with speed, never pumps per-frame
 };
 
-// Drone skier beacon (judge r1: the skier is an invisible speck from 117 m — the rig had no
-// protagonist). A flat high-contrast ring + vertical light beam, depth-tested OFF so walls and
-// storm flakes never swallow it; sized for the drone's distance, hidden in every other rig.
+// Drone skier locator (polish carryover #7): the old red ring + light beam read as a debug
+// gizmo. Replaced by a soft DIEGETIC pulse — a warm ember glow on the snow with a slow
+// expanding ripple, matching the dusk-palette glow (visuals.js 0xffb36b family) — like the
+// last alpenglow catching the skier. Depth-tested OFF so walls/storm never swallow it.
 const BEACON = {
-  RING_R: 2.2,    // m outer radius: ~10 px at the drone's ~117 m — readable, not a bullseye sticker
-  RING_W: 0.45,   // m ring thickness: thin enough to read as a marker, thick enough to survive AA
-  BEAM_H: 14,     // m beam height (was 26 for the 117 m drone): the rig now hangs ~57 m out — still
-                  // clears local walls without slicing the whole frame
-  BEAM_R: 0.18,   // m beam radius: a light shaft, not a pillar
-  COLOR: 0xff5a3c, // same warm-red family as the skier: the marker IS the protagonist's color
-  PULSE_HZ: 0.9,  // slow pulse: attracts the eye without strobing the map read
-  LIFT: 0.3,      // m above the snow so the ring never z-fights the terrain it hovers over
+  R: 3.2,         // m glow disc radius: ~14 px at the drone's ~57 m — findable, not a bullseye
+  COLOR: 0xffb36b, // THE dusk ember (same uniform value as the sky/veil glow): diegetic palette
+  PULSE_HZ: 0.55, // one ripple ~every 1.8 s: a slow breath, never a strobe over the map read
+  GLOW_A: 0.30,   // core glow alpha: warm light pooled on snow, additive — reads as light, not paint
+  RING_A: 0.45,   // ripple peak alpha: the moving edge is what catches the scanning eye
+  LIFT: 0.3,      // m above the snow so the disc never z-fights the terrain it lights
 };
 
 const STORM_FOG_SHRINK = 0.35; // at full storm fog ranges shrink 35%: wide shots show weather closing in (judge r1)
@@ -140,25 +150,51 @@ const DRONE_FOG = {
 };
 
 function makeBeacon() {
+  // One flat disc with a radial shader: soft ember glow core + an expanding ripple ring that
+  // fades as it travels (a light pulse on the snow, not a gizmo). Additive + depthTest off:
+  // it reads as LIGHT pooled around the skier and is never swallowed by walls or storm flakes.
+  const uniforms = {
+    uTime: { value: 0 },
+    uColor: { value: new THREE.Color(BEACON.COLOR) },
+  };
+  const mat = new THREE.ShaderMaterial({
+    uniforms,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform vec3 uColor;
+      varying vec2 vUv;
+      void main() {
+        float r = length(vUv * 2.0 - 1.0); // 0 center .. 1 disc edge
+        // core glow: quadratic falloff — warm light pooled on the snow under the skier
+        float glow = (1.0 - smoothstep(0.0, 0.85, r));
+        glow *= glow;
+        // ripple: a ring expanding 0 -> edge each pulse period, fading as it grows
+        float ph = fract(uTime * ${BEACON.PULSE_HZ.toFixed(3)});
+        float ring = (1.0 - smoothstep(0.0, 0.10, abs(r - ph))) * (1.0 - ph); // 0.10: soft 30 cm ripple edge at R=3.2
+        float a = glow * ${BEACON.GLOW_A.toFixed(2)} + ring * ${BEACON.RING_A.toFixed(2)};
+        if (a < 0.004) discard; // skip invisible fragments: the disc covers ~32 m² of frame
+        gl_FragColor = vec4(uColor, a);
+      }`,
+  });
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(BEACON.R, 40), mat);
+  disc.rotation.x = -Math.PI / 2; // flat on the snow: read top-down from the drone's ~58° pitch
+  disc.position.y = BEACON.LIFT;
+  disc.renderOrder = 20; // after snow (10): the protagonist marker beats the blizzard
   const g = new THREE.Group();
-  // MeshBasicMaterial + depthTest off: the beacon is a UI marker in world space, never occluded
-  const mat = new THREE.MeshBasicMaterial({
-    color: BEACON.COLOR, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false,
-  });
-  const ring = new THREE.Mesh(new THREE.RingGeometry(BEACON.RING_R - BEACON.RING_W, BEACON.RING_R, 32), mat);
-  ring.rotation.x = -Math.PI / 2; // flat on the snow: read top-down from the drone's ~58° pitch
-  ring.position.y = BEACON.LIFT;
-  const beamMat = new THREE.MeshBasicMaterial({
-    color: BEACON.COLOR, transparent: true, opacity: 0.35, depthTest: false, depthWrite: false,
-    blending: THREE.AdditiveBlending, // a light shaft, not a solid pole
-  });
-  const beam = new THREE.Mesh(new THREE.CylinderGeometry(BEACON.BEAM_R, BEACON.BEAM_R, BEACON.BEAM_H, 8, 1, true), beamMat);
-  beam.position.y = BEACON.BEAM_H / 2;
-  g.add(ring, beam);
-  g.renderOrder = 20; // after snow (10): the protagonist marker beats the blizzard
-  ring.renderOrder = 20;
-  beam.renderOrder = 20;
+  g.add(disc);
+  g.renderOrder = 20;
   g.visible = false;
+  g.userData.uniforms = uniforms; // update() drives uTime for the ripple phase
   return g;
 }
 
@@ -214,12 +250,14 @@ export class CameraRig {
   /** Smoothed storm intensity 0..1 (main.js): fog ranges shrink with it so wide shots read the weather. */
   setStorm(i01) {
     this._storm = Number.isFinite(i01) ? Math.min(Math.max(i01, 0), 1) : 0;
+    _sharedStorm = this._storm; // mirror for labels.js (module-level shared view state above)
   }
 
   /** Switch rigs at runtime; returns false (and stays put) on unknown names — safe for raw ?cam=. */
   setMode(name) {
     if (!CAM_MODES.includes(name)) return false;
     this.mode = name;
+    _activeMode = name; // mirror for carve.js (module-level shared view state above)
     this._snap = true;
     this._roll = 0;
     this._baseFov =
@@ -251,7 +289,8 @@ export class CameraRig {
     const fwd = this._lastTau === null || dt <= 0 ? 0 : ((tau - this._lastTau) / dt) * CFG.DAY_M;
     this._lastTau = tau;
     const speed = Math.hypot(state.vs ?? 0, state.vy ?? 0, fwd);
-    const want = this.mode === 'drone' ? 0 : FOV_KICK.DEG * Math.min(speed / FOV_KICK.REF_MS, 1);
+    // chase/shoulder only (carryover #6): drone is a static overview; fp already rolls + shakes
+    const want = this.mode === 'drone' || this.mode === 'fp' ? 0 : FOV_KICK.DEG * Math.min(speed / FOV_KICK.REF_MS, 1);
     this._fovKick += (want - this._fovKick) * (this._snap ? 1 : 1 - Math.pow(FOV_KICK.DAMP, dt));
     const fov = this._baseFov + this._fovKick;
     if (Math.abs(fov - this.camera.fov) > 0.05) { // skip sub-visible projection rebuilds
@@ -268,9 +307,7 @@ export class CameraRig {
     const z = -tau * CFG.DAY_M; // skier pinned to the frontier (CONTRACTS §3)
     if (this._beacon.visible) {
       this._beacon.position.set(state.s, state.y, z);
-      // gentle opacity pulse: ring breathes 0.55..0.95 so the eye finds it in a blizzard
-      const pulse = 0.75 + 0.2 * Math.sin(this._t * BEACON.PULSE_HZ * 2 * Math.PI);
-      this._beacon.children[0].material.opacity = pulse;
+      this._beacon.userData.uniforms.uTime.value = this._t; // ripple phase clock (shader pulse)
     }
     if (this.mode === 'fp') return this._updateFp(state, z, tau, dt);
 

@@ -1,9 +1,25 @@
 // World constants — CONTRACTS §0 verbatim (single source of truth for magic numbers).
+
+// LANE_M is runtime-settable at boot via ?lanew= for tuning (lane-width experiment, PLAN
+// Amendments): heights are UNCHANGED, only the lateral axis stretches, so lateral slopes h_s
+// shrink by 1/LANE_M — the de-knifing mechanism.
+// Guarded for non-browser contexts (vitest/node have no `location`): tests see the default.
+const LANE_M_DEFAULT = 4; // 1 lane = 4 m: lane-width judging verdict (2026-06) — w4 scored best
+                          // (medians w2=5, w4=7.5, w8=6); the de-knifed surface must be the default
+const LANE_M_MIN = 4;     // widths < 4 retired by the same verdict: at LANE_M=2 a dz≈2 neighbor gap
+                          // still renders ~88° inter-lane walls (smoothstep removes the crease, not the cliff)
+const laneWParam =
+  typeof location !== 'undefined'
+    ? parseFloat(new URLSearchParams(location.search).get('lanew'))
+    : NaN;
+
 export const CFG = {
   DAY_M: 1,            // 1 trading day = 1 m along time axis (plan §1)
-  LANE_M: 1,           // 1 lane = 1 m circumference (plan §1)
+  LANE_M: Number.isFinite(laneWParam) && laneWParam > 0 ? Math.max(laneWParam, LANE_M_MIN) : LANE_M_DEFAULT,
   K_HEIGHT: 25,        // h = K * z(log return); tune at aesthetics gate (plan §1/§6)
-  ALPHA_PLATEAU: 0.5,  // inner flat fraction of lane width: "all-in" has finite measure (plan §1)
+  ALPHA_PLATEAU: 0.08, // inner "exact track" strip at each lane center: thin enough that almost the
+                       // whole surface is a smooth two-stock mixture (user spec: no knife edge), wide
+                       // enough that single-stock holding / the HUD single-ticker state stays reachable
   THETA_MAX_DEG: 35,   // lateral force/grip slope saturation; geometry stays true (plan §3)
   PHYS_HZ: 120,        // fixed timestep accumulator; sim identical across devices (plan §3/§7)
   CLOCK_DPS: 2,        // default world-clock trading days/sec (plan §0)

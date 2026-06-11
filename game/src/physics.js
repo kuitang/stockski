@@ -258,9 +258,13 @@ export class Skier {
 
     // N = m(g·w + w·a_terrain); collapse → avalanche emerges, no special case (plan §3)
     this.N = Math.max(0, PHYS.MASS * this.w * (PHYS.G + aTerrain));
-    this.grip = PHYS.MU_EDGE * this.N;
+    // steering is a LANE-space command (PLAN Amendments: ?lanew= experiment): with wider lanes the
+    // same input must cover proportionally more meters, so both the edge's lateral hold and the
+    // player's demand scale by LANE_M — steering feels like lanes/sec at any lane width, the
+    // carve/skid ratio (demand/grip) is width-invariant, and grip ∝ N is preserved (constant factor)
+    this.grip = PHYS.MU_EDGE * this.N * CFG.LANE_M;
     // steering demand is what the edge asks at nominal full weight; actual N decides what it gets
-    const demand = steer * PHYS.MU_EDGE * PHYS.MASS * PHYS.G;
+    const demand = steer * PHYS.MU_EDGE * PHYS.MASS * PHYS.G * CFG.LANE_M;
     this.skidding = Math.abs(demand) > this.grip; // demand beyond grip => skid, excess ignored
     this.steerForce = clamp(demand, -this.grip, this.grip);
 
@@ -305,7 +309,9 @@ export class Skier {
   // w = 0: zero exposure = zero terrain coupling — gravity off, free drift at r_f (plan §3)
   _stepFlight(steer, dt) {
     this.grounded = false;
-    this.vs += steer * PHYS.AIR_THRUST * dt;
+    // ×LANE_M: ghost-mode repositioning is a lane-space action — keeps AIR_THRUST's
+    // "crosses a lane in <1 s" true at any ?lanew= (PLAN Amendments)
+    this.vs += steer * PHYS.AIR_THRUST * CFG.LANE_M * dt;
     this.vs *= Math.exp(-PHYS.FLIGHT_DRAG * dt);
     this.vy *= Math.exp(-PHYS.FLIGHT_DRAG * dt);
     this.s += this.vs * dt;

@@ -6,6 +6,9 @@
 // Anchor ext: the portfolio $ figure is the HUD's visual anchor — its own top-center
 // element (#wealth) with a session-P&L + gap-to-SPY delta row, an ~80ms scale pulse
 // on each $1k crossing, and a color that drifts red with drawdown from the session high.
+// Blend ext (user spec "no knife edge"): the position line shows the real two-stock mixture
+// "AAPL 62% · MSFT 27% · cash 11%" (weights = PLAN §2.1) whenever u is off a pure track;
+// w>1 turns the cash segment into an amber "borrow N%".
 
 import { CFG } from './config.js';
 
@@ -43,6 +46,37 @@ export function fmtW(w) {
   return `${parseFloat((w ?? 0).toFixed(2))}x`;
 }
 
+// dual-ticker portfolio readout (user spec: "no knife edge" — the position line shows the
+// actual two-stock mixture whenever the skier is off a pure track)
+export const U_PURE = 0.02;  // within 2% of a plateau edge the minor leg is ≤2% of a full stake —
+                             // at the whole-percent display resolution that rounds to a pure holding
+const CASH_SHOW = 0.005;     // |1−w| below half a display-percent rounds to 0%: hide the cash segment
+
+/**
+ * Position-line segments for the blend pair (symA = lane i, symB = lane i+1) at blend u and
+ * exposure w. Weights are PLAN §2.1 verbatim: ( w·(1−u), w·u, 1−w ) over (i, i+1, cash) —
+ * reused, not re-derived. Returns { main, tail, borrow, domSym }:
+ *   main   "AAPL 62% · MSFT 27%" (dominant first) or "AAPL 87%" when u is within U_PURE of pure
+ *   tail   "cash 11%" | "borrow 38%" (w>1 ⇒ cash < 0 = borrowed money) | '' when it rounds to 0%
+ *   borrow true when the tail is leverage (styled amber, matching the exposure bar's lev tier)
+ *   domSym the dominant ticker (u ≥ 0.5 ⇒ lane i+1 — same convention as main.js dispLane)
+ * Pure for tests.
+ */
+export function fmtPortfolio(symA, symB, u, w) {
+  const W = w ?? 0;
+  const U = Math.min(Math.max(u ?? 0, 0), 1);
+  const wa = W * (1 - U), wb = W * U;            // PLAN §2.1: ( w·(1−u), w·u, 1−w )
+  const cash = 1 - W;
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  const domSym = U >= 0.5 ? symB : symA;         // dominant holding, matches dispLane (main.js)
+  const main = (U < U_PURE || U > 1 - U_PURE)
+    ? `${domSym} ${pct(W)}`                      // pure track: single ticker carries all of w
+    : (U >= 0.5 ? `${symB} ${pct(wb)} · ${symA} ${pct(wa)}` : `${symA} ${pct(wa)} · ${symB} ${pct(wb)}`);
+  const borrow = cash <= -CASH_SHOW;
+  const tail = borrow ? `borrow ${pct(-cash)}` : cash >= CASH_SHOW ? `cash ${pct(cash)}` : '';
+  return { main, tail, borrow, domSym };
+}
+
 // exposure-bar leverage styles live here (not ui.css) so hud.js stays the single owner of the
 // readout's states; injected once per document
 const LEV_CSS = `
@@ -73,7 +107,7 @@ export class Hud {
     const hud = document.createElement('div');
     hud.id = 'hud';
     hud.innerHTML =
-      '<div><span class="hud-sym"></span><span class="hud-dayret pnl-flat"></span></div>' +
+      '<div><span class="hud-sym"></span><span class="hud-cash"></span><span class="hud-dayret pnl-flat"></span></div>' +
       '<div class="hud-name"></div>' +
       '<div class="hud-sector"></div>' +
       '<div class="hud-date"></div>';
@@ -105,6 +139,7 @@ export class Hud {
     this.wealthEl = wealthEl;
     this._n = { // cached nodes — queried exactly once
       sym: hud.querySelector('.hud-sym'),
+      cash: hud.querySelector('.hud-cash'),
       dayRet: hud.querySelector('.hud-dayret'),
       name: hud.querySelector('.hud-name'),
       sector: hud.querySelector('.hud-sector'),
@@ -119,31 +154,58 @@ export class Hud {
     this._peak = 0; // session high-water mark; first update() seeds it — drawdown drives the red drift
     // last-shown values — numbers compared before any string is built
     this._last = {
-      sym: null, name: null, sector: null, date: null, dayRet: NaN,
+      pos: null, cashTxt: null, borrow: false, symA: null, symB: null, posW: NaN, posU: NaN,
+      name: null, sector: null, date: null, dayRet: NaN,
       w: NaN, wealth: NaN, kilo: NaN, dd: NaN, hi: false, lo: false, pnl: NaN, gap: NaN, lev: '',
     };
   }
 
   /**
-   * @param {{w:number}} state  physics State (CONTRACTS §3) — w drives the exposure bar
-   * @param {{sym:string,name:string,sector:string,dayRet:number,date:string,wealth:number,ghostWealth:number}} info
+   * @param {{w:number,u:number}} state  physics State (CONTRACTS §3) — w drives the exposure bar,
+   *   (u, w) drive the dual-ticker position line
+   * @param {{sym:string,name:string,sector:string,dayRet:number,date:string,wealth:number,
+   *   ghostWealth:number,laneA?:{sym:string},laneB?:{sym:string},u?:number}} info
+   *   laneA/laneB = blend-pair lane metas (lane i, lane i+1 wrapped); sym/name stay the DOMINANT
+   *   lane's (it keeps the company-name line — the minor holding is ticker-only on the position line)
    */
   update(state, info) {
     const n = this._n, last = this._last;
+    const w = state?.w ?? 0;
 
-    if (info.sym !== last.sym) { last.sym = info.sym; n.sym.textContent = info.sym ?? ''; }
+    // position line: the actual two-stock mixture (user spec "no knife edge"); falls back to the
+    // dominant sym as a pure holding for callers that don't pass the blend pair. Strings are
+    // rebuilt only when an input moves at display resolution (file rule: no per-frame allocation);
+    // POS_EPS = W_EPS/2: each blend weight is a product of two inputs, so half the 2-dp deadband
+    // per input keeps the whole-percent readout at most one rounding step stale.
+    const POS_EPS = W_EPS / 2;
+    const hasPair = info.laneA?.sym != null && info.laneB?.sym != null;
+    const symA = hasPair ? info.laneA.sym : (info.sym ?? '—');
+    const symB = hasPair ? info.laneB.sym : symA;
+    const U = hasPair ? (info.u ?? state?.u ?? 0) : 0;
+    if (symA !== last.symA || symB !== last.symB ||
+        !(Math.abs(w - last.posW) < POS_EPS) || !(Math.abs(U - last.posU) < POS_EPS)) {
+      last.symA = symA; last.symB = symB; last.posW = w; last.posU = U;
+      const p = fmtPortfolio(symA, symB, U, w);
+      if (p.main !== last.pos) { last.pos = p.main; n.sym.textContent = p.main; }
+      const cashTxt = p.tail ? ' · ' + p.tail : '';
+      if (cashTxt !== last.cashTxt) { last.cashTxt = cashTxt; n.cash.textContent = cashTxt; }
+      if (p.borrow !== last.borrow) { last.borrow = p.borrow; n.cash.classList.toggle('borrow', p.borrow); }
+    }
+
     if (info.name !== last.name) { last.name = info.name; n.name.textContent = info.name ?? ''; }
     if (info.sector !== last.sector) { last.sector = info.sector; n.sector.textContent = info.sector ?? ''; }
     if (info.date !== last.date) { last.date = info.date; n.date.textContent = info.date ?? ''; }
 
+    // 'day' label disambiguates the chip (lane-width judging mustFix): in the dual-ticker state
+    // the % is the BLENDED two-stock position's day return (main.js mixes per PLAN §2.1), and an
+    // unlabeled % next to "NCMI 55% · BERY 45%" read as either lane's move or another weight
     const dayPct = (info.dayRet ?? 0) * 100;
     if (!(Math.abs(dayPct - last.dayRet) < PCT_EPS)) {
       last.dayRet = dayPct;
-      n.dayRet.textContent = (dayPct >= 0 ? '+' : '') + dayPct.toFixed(2) + '%';
+      n.dayRet.textContent = 'day ' + (dayPct >= 0 ? '+' : '') + dayPct.toFixed(2) + '%';
       setPnlClass(n.dayRet, dayPct);
     }
 
-    const w = state?.w ?? 0;
     if (!(Math.abs(w - last.w) < W_EPS)) {
       // detent tick: flash the w=1 line when the displayed exposure crosses it (either direction)
       if (!Number.isNaN(last.w) && (last.w - 1) * (w - 1) < 0) {

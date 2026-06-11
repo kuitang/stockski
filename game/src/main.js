@@ -29,7 +29,8 @@ const START_TAU = 1;        // spawn at day 1 (task spec): one revealed day-stri
 const STORM_FORCE = parseFloat(new URLSearchParams(location.search).get('storm'));
 const SPAWN_WAIT_MS = 8000; // first-tile budget: matches plan §7 mobile load target (< 8 s)
 const RESPAWN_DELAY_MS = 1800; // long enough to read the death cause, short enough to retry eagerly
-const STUB_LAT_MS = 6;      // physics-stub lateral speed m/s (~6 lanes/s): brisk terrain eyeballing
+const STUB_LAT_LPS = 6;     // physics-stub lateral speed in LANES/s (×LANE_M below): keeps the same
+                            // lane-crossing feel at any ?lanew= (PLAN Amendments lane-width experiment)
 const STUB_FLOAT_M = 1.5;   // physics-stub visual float at w=0 — mirrors plan §3 "float ∝ (1−w)"
 const START_WEALTH_FALLBACK = 100000; // $100k start if hud.js (which owns START_WEALTH) is absent
 
@@ -49,7 +50,7 @@ class PhysicsStub {
   }
   step(dt, input = {}) {
     this.day += this.world.daysPerSec * dt;
-    this.s += (input.steer ?? 0) * STUB_LAT_MS * dt;
+    this.s += (input.steer ?? 0) * STUB_LAT_LPS * CFG.LANE_M * dt;
     this.w = input.wTarget ?? 1;
     const q = this.world.heightAt(this.s, this.day);
     if (q) {
@@ -494,14 +495,26 @@ async function boot() {
     if (hud) {
       const lane = dispLane(state); // dominant holding: the symbol actually under foot
       const meta = m.lanes[lane] ?? {};
+      const laneA = wrapLane(state.lane ?? 0); // blend pair (PLAN §2.1): terrain lane i…
+      const laneB = wrapLane(laneA + 1);
+      // blended day return: the dual-ticker HUD's % is the TWO-STOCK POSITION's day move
+      // (PLAN §2.1 weights, cash excluded), not the dominant lane's — judged ambiguous otherwise
+      const rA = dayReturn(laneA, clock.tau), rB = dayReturn(laneB, clock.tau);
+      const U = Math.min(Math.max(state.u ?? 0, 0), 1);
       hud.update(state, {
         sym: meta.sym ?? '—',
         name: meta.name ?? '',
-        sector: meta.sector ?? '',
+        // pipeline writes literal 'Unknown' when EODHD has no sector: hide the row rather
+        // than render the word 'Unknown' in every HUD (lane-width judging mustFix)
+        sector: meta.sector && meta.sector !== 'Unknown' ? meta.sector : '',
         date: m.dates[Math.min(Math.floor(clock.tau), m.nDays - 1)] ?? '',
-        dayRet: dayReturn(lane, clock.tau),
+        dayRet: Number.isFinite(rA) && Number.isFinite(rB) ? (1 - U) * rA + U * rB
+              : dayReturn(lane, clock.tau), // void neighbor: fall back to the dominant lane
         wealth: startWealth * Math.exp(state.logW),
         ghostWealth: startWealth * Math.exp(ghostZ(clock.tau) - ghostZ0),
+        laneA: m.lanes[laneA],                // …and i+1 (wrapped): hud renders the actual
+        laneB: m.lanes[laneB],                // two-stock mixture (user spec "no knife edge")
+        u: state.u,
       });
     }
     labels?.update(clock.tau, state.s);

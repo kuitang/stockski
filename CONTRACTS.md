@@ -9,9 +9,18 @@ Magic numbers carry one-line justifications (style rule).
 ```js
 export const CFG = {
   DAY_M: 1,            // 1 trading day = 1 m along time axis (plan §1)
-  LANE_M: 1,           // 1 lane = 1 m circumference (plan §1)
+  LANE_M: 4,           // 1 lane = 4 m circumference DEFAULT (user-decided geometry amendment,
+                       // 2026-06 lane-width judging: w4 scored best — medians w2=5, w4=7.5, w8=6).
+                       // Runtime-settable at boot via ?lanew= for tuning, clamped to >= 4: widths
+                       // <= 2 retain near-vertical inter-lane walls (knife fins) and are retired.
+                       // Heights are unchanged; lateral slopes h_s scale as 1/LANE_M (de-knifing).
+                       // Lane-space inputs (steering authority, ghost-mode thrust) scale by LANE_M
+                       // so steering feels like lanes/sec at any width.
   K_HEIGHT: 25,        // h = K * z(log return); tune at aesthetics gate (plan §1/§6)
-  ALPHA_PLATEAU: 0.5,  // inner flat fraction of lane width: "all-in" has finite measure (plan §1)
+  ALPHA_PLATEAU: 0.08, // thin "exact track" strip at each lane center (PLAN Amendments, user spec
+                       // "no knife edge"): single-stock holding + the HUD single-ticker state stay
+                       // achievable; the other 92% of the inter-center distance is a smoothstep
+                       // two-stock mixture — C1 at both plateau edges as before
   THETA_MAX_DEG: 35,   // lateral force/grip slope saturation; geometry stays true (plan §3)
   PHYS_HZ: 120,        // fixed timestep accumulator; sim identical across devices (plan §3/§7)
   CLOCK_DPS: 2,        // default world-clock trading days/sec (plan §0)
@@ -80,7 +89,7 @@ Era build output under `game/public/tiles/<era>/`:
 |---|---|---|
 | config.js | constants above | `CFG` |
 | stream.js | tile fetch+cache+eviction keyed to τ | `class TileStream { constructor(manifestUrl); load(); z(dayF, laneF): number|NaN /* PCHIP in t, raw per-lane in s */; zLane(lane, dayF): number|NaN; ensure(tau): void /* prefetch window */; manifest }` |
-| terrain.js | height composition + meshes | `heightAt(s, dayF, stream): {h, dh_ds, dh_dt, lane, u}` implementing plateau/margin smoothstep (plan §1) on top of stream.zLane; builds/updates THREE meshes per tile; void = skipped triangles |
+| terrain.js | height composition + meshes | `heightAt(s, dayF, stream): {h, dh_ds, dh_dt, lane, u}` implementing plateau/margin smoothstep (plan §1, α = 0.08 per Amendments) on top of stream.zLane; builds/updates THREE meshes per tile (margins sampled at ≥ 5 segments each so the wide smoothstep renders as a curve); void = skipped triangles |
 | physics.js | skier dynamics, PURE (no THREE) | `class Skier { step(dt, input, terrainFn, clock): State }` — input `{steer:-1..1, wTarget:0..1, jump?:bool}`; implements w-scaled gravity/N/grip/saturation/detent/avalanche (plan §3), portfolio identity dlogW (plan §2) incl. r_f; `State = {s, y, vs, vy, w, u, lane, grounded, logW, dead, deathCause}` |
 | clock.js | world clock τ, pause, speed, checkpoints | `class WorldClock { tau, daysPerSec, pause(), resume(), setSpeed(), checkpoint(), rewind() }` |
 | frontier.js | whiteout curtain, snowfall strip at τ | `class Frontier { update(tau) }` |
