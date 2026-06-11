@@ -1,13 +1,58 @@
 // hud.js — DOM HUD (plan §7, CONTRACTS §3): ticker, company, day's %, w bar,
 // wealth $ (start $100k), gap-to-ghost %. DOM only; zero per-frame allocation:
 // nodes cached once, textContent touched only when the displayed value changes.
+// Leverage ext: exposure readout is a vertical 0..W_MAX bar with a marked detent
+// line at w=1, an 'x' multiplier label, amber above 1x, pulsing red near margin call.
+
+import { CFG } from './config.js';
 
 export const START_WEALTH = 100000; // plan §7 / CONTRACTS §4: portfolio starts at $100k
+export const MC_PROX = 0.8;         // u·w beyond this = margin-call proximity: at w=2 the call lands at u·w=1,
+                                    // so 0.8 warns one margin-fifth before the cliff (also pulses on void lanes)
 
 // display quantization: skip DOM writes for sub-display-precision changes
 const PCT_EPS = 0.005;   // day % and ghost gap shown to 2 dp
 const W_EPS = 0.005;     // w bar/number shown to 2 dp
 const WEALTH_EPS = 0.5;  // wealth shown to whole dollars
+
+/** Exposure-bar styling tier: '' (0..1 normal) | 'lev' (w>1, amber) | 'mc' (pulsing red:
+ *  lane is void with exposure, OR u·w > MC_PROX while levered — margin-call proximity).
+ *  The u·w term is gated to w>1: terrain reports (i, u=1) on the left half of every plateau
+ *  (its blend convention), so an ungated u·w>0.8 would flash red during plain w=1 skiing,
+ *  contradicting the "0..1 normal" tier. A margin call needs w>1 anyway. Pure for tests. */
+export function exposureLevel(w, u, laneVoid) {
+  const W = w ?? 0;
+  if ((laneVoid && W > 0) || (W > 1 && (u ?? 0) * W > MC_PROX)) return 'mc';
+  return W > 1 ? 'lev' : '';
+}
+
+/** '1.4x' style multiplier label: up to 2 dp, trailing zeros trimmed. Pure for tests. */
+export function fmtW(w) {
+  return `${parseFloat((w ?? 0).toFixed(2))}x`;
+}
+
+// exposure-bar leverage styles live here (not ui.css) so hud.js stays the single owner of the
+// readout's states; injected once per document
+const LEV_CSS = `
+#exposure .w-track { overflow: visible; }
+#exposure .w-detent {
+  position: absolute; left: -3px; right: -3px; height: 2px;
+  bottom: ${(1 / CFG.W_MAX) * 100}%;            /* the w=1 detent mark on a 0..W_MAX bar */
+  background: rgba(255, 255, 255, 0.65);
+  border-radius: 1px;
+  pointer-events: none;
+}
+#exposure .w-detent.tick { animation: detent-tick 0.18s ease-out; }
+@keyframes detent-tick {                         /* haptic-style visual tick at the w=1 crossing */
+  0% { transform: scaleX(1.8) scaleY(2.5); background: #fff; }
+  100% { transform: none; }
+}
+#exposure.lev .w-fill { background: linear-gradient(to top, #f59e0b, #fbbf24); } /* >1x: amber — borrowed money */
+#exposure.lev .w-num { color: #fbbf24; }
+#exposure.mc .w-fill { background: linear-gradient(to top, #dc2626, #f87171); animation: mc-pulse 0.6s ease-in-out infinite; }
+#exposure.mc .w-num { color: #f87171; animation: mc-pulse 0.6s ease-in-out infinite; }
+@keyframes mc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } } /* margin-call proximity: pulsing red */
+`;
 
 export class Hud {
   /** @param {HTMLElement} [root] container; defaults to document.body */
@@ -24,9 +69,16 @@ export class Hud {
       '<div class="hud-ghostgap pnl-flat"></div>';
     root.appendChild(hud);
 
+    if (!document.getElementById('hud-lev-style')) {
+      const style = document.createElement('style');
+      style.id = 'hud-lev-style';
+      style.textContent = LEV_CSS;
+      document.head?.appendChild(style);
+    }
+
     const expo = document.createElement('div');
     expo.id = 'exposure';
-    expo.innerHTML = '<div class="w-track"><div class="w-fill"></div></div><div class="w-num"></div>';
+    expo.innerHTML = '<div class="w-track"><div class="w-fill"></div><div class="w-detent"></div></div><div class="w-num"></div>';
     root.appendChild(expo);
 
     this.el = hud;
@@ -40,10 +92,11 @@ export class Hud {
       wealth: hud.querySelector('.hud-wealth'),
       ghostGap: hud.querySelector('.hud-ghostgap'),
       wFill: expo.querySelector('.w-fill'),
+      wDetent: expo.querySelector('.w-detent'),
       wNum: expo.querySelector('.w-num'),
     };
     // last-shown values — numbers compared before any string is built
-    this._last = { sym: null, name: null, sector: null, date: null, dayRet: NaN, w: NaN, wealth: NaN, gap: NaN };
+    this._last = { sym: null, name: null, sector: null, date: null, dayRet: NaN, w: NaN, wealth: NaN, gap: NaN, lev: '' };
   }
 
   /**
@@ -67,9 +120,25 @@ export class Hud {
 
     const w = state?.w ?? 0;
     if (!(Math.abs(w - last.w) < W_EPS)) {
+      // detent tick: flash the w=1 line when the displayed exposure crosses it (either direction)
+      if (!Number.isNaN(last.w) && (last.w - 1) * (w - 1) < 0) {
+        n.wDetent.classList.remove('tick');
+        void n.wDetent.offsetWidth; // restart the CSS animation even on back-to-back crossings
+        n.wDetent.classList.add('tick');
+      }
       last.w = w;
-      n.wFill.style.height = (w * 100).toFixed(1) + '%';
-      n.wNum.textContent = 'w ' + w.toFixed(2);
+      n.wFill.style.height = ((w / CFG.W_MAX) * 100).toFixed(1) + '%'; // bar spans 0..W_MAX, detent at 1
+      n.wNum.textContent = fmtW(w);
+    }
+
+    // styling tier: normal 0..1, amber when levered, pulsing red near a margin call
+    // (lane void inferred from airborne-with-exposure when the caller doesn't pass info.laneVoid)
+    const laneVoid = info.laneVoid ?? (state?.grounded === false && w > 0);
+    const lev = exposureLevel(w, state?.u, laneVoid);
+    if (lev !== last.lev) {
+      if (last.lev) this.expoEl.classList.remove(last.lev);
+      if (lev) this.expoEl.classList.add(lev);
+      last.lev = lev;
     }
 
     const wealth = info.wealth ?? START_WEALTH;

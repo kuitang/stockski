@@ -32,6 +32,9 @@ SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")  # PLAN: plain 1-5 capital letters; excl
 ARCHIVE_RE = re.compile(r"^[A-Z]{1,5}(?:_old(?:old)*\d?|\d)$")
 # Word-boundary match so e.g. UNITED/WRIGHT survive while "UNITS"/"RIGHTS" instruments are dropped.
 NAME_DROP_RE = re.compile(r"\b(WARRANTS?|RIGHTS?|UNITS?|PREFERRED|PREF|PFD)\b")
+# Exchange test symbols (synthetic prices). Real "* Test Systems" companies are NOT matched.
+TEST_CODE_RE = re.compile(r"^Z[A-Z]ZZT$")
+TEST_NAME_RE = re.compile(r"TEST (STOCK|SYMBOL)|LISTED TEST|TICK PILOT")
 
 
 def read_token() -> str:
@@ -77,7 +80,10 @@ def is_candidate(rec: dict) -> bool:
     code = rec.get("Code") or ""
     if not (SYMBOL_RE.match(code) or ARCHIVE_RE.match(code)):
         return False
-    return not NAME_DROP_RE.search((rec.get("Name") or "").upper())
+    if TEST_CODE_RE.match(code):
+        return False
+    name = (rec.get("Name") or "").upper()
+    return not (NAME_DROP_RE.search(name) or TEST_NAME_RE.search(name))
 
 
 def main():

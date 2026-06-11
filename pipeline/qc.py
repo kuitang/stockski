@@ -23,6 +23,11 @@ Full-range QC per phase0 findings (analysis/phase0_report.md):
                      symbol with > MAX_BREAKS unexplained breaks is junk data => dropped.
     (The symbol-change/fundamentals APIs are 403 on this plan — finding #4 — so
     classification is price/volume-signature only.)
+  * SPLICE SEVERING: an unexplained one-day |move| beyond what a continuous company
+    can print (> +395% / < -92%; see SPLICE_*_LOGRET) is a data splice — the series
+    is severed there exactly like a reuse gap (live keeps last segment, dead first).
+  * EXCHANGE TEST SYMBOLS (ZAZZT family, "LISTED TEST STOCK" names) are dropped:
+    synthetic prices. Real companies named "* Test Systems" (AEHR, EGLT1) are kept.
   * termination classification (PLAN §6.3): alive if last print within
     ALIVE_GRACE_DAYS of era end; else terminal 30-trading-day return < -80% =>
     bankruptcy, else acquisition.
@@ -57,6 +62,23 @@ DV_WINDOW_TD = 63         # PLAN §0: universe ranking = trailing 63d median dol
 MIN_WINDOW_ROWS = 2       # need >= 2 closes inside the era window to define even one return
 GAP_SEVER_TD = 30         # phase0 finding #2: > 30 trading days of no data then resurrection => ticker reuse
 HALT_RUN_MIN = 3          # phase0 finding #5: >= 3 zero-volume flat closes = halt, not returns
+# Splice severing: a one-day move beyond these is not a return a continuous company can
+# print — it is a data splice (reverse-merger relist, unadjusted reverse split, recycled
+# ticker with no calendar gap). Largest real one-day gains (buyout premiums, squeezes)
+# are ~+130%..+300% (logret <= ~1.4); +1.6 (+395%) is safely beyond. Real one-day mid-life
+# crashes do reach -90% (logret -2.3, fraud/trial failures), so the down threshold is
+# -2.5 (-92%); terminal collapses and post-halt repricings are carved out before this.
+SPLICE_UP_LOGRET = 1.6
+SPLICE_DOWN_LOGRET = -2.5
+UNTRADEABLE_CLOSE = 0.01  # raw close < 1 cent = sub-penny quote noise, not a tradeable print (canary only)
+# Canary robustness: a real listed stock returning > +2000% in ONE calendar year is once-a-
+# decade rare; sub-dollar quote-ladder junk does it routinely and one x700 lane shifts a
+# 5,000-lane equal-weight mean by >10pp. Returns are CAPPED (not dropped) at +20x for the
+# canary mean; the uncapped mean and per-year cap counts are reported alongside.
+CANARY_CAP_RET = 20.0
+# Exchange test symbols (ZAZZT family etc.) carry absurd synthetic prices.
+TEST_CODE_RE = re.compile(r"^Z[A-Z]ZZT$")
+TEST_NAME_RE = re.compile(r"TEST (STOCK|SYMBOL)|LISTED TEST|TICK PILOT")
 MIN_IPO_YEAR_BARS = 5     # partial first-year return needs >= 5 bars to mean anything
 CANARY_PP = 0.25          # task gate: |EW mean - SPY| > 25pp => flag year
 ARCHIVE_RE = re.compile(r"^[A-Z]{1,5}(?:_old(?:old)*\d?|\d)$")  # recycled-ticker archives (build_universe.py)
@@ -103,21 +125,46 @@ def trading_gaps(dates: np.ndarray, spy_dates: np.ndarray) -> np.ndarray:
     return np.diff(idx)
 
 
-def yearly_returns(dates: np.ndarray, adj: np.ndarray, year_min: int):
+def classify_breaks(adj: np.ndarray, vol: np.ndarray, dead: bool):
+    """Indices i where |log(adj[i+1]/adj[i])| > BREAK_ABS_LOGRET, with a class each:
+    halt_reprice / stale_close / terminal / unexplained (module docstring)."""
+    logret = np.diff(np.log(adj))
+    out = []
+    n = len(adj)
+    for i in np.flatnonzero(np.abs(logret) > BREAK_ABS_LOGRET):
+        run, j = 0, i
+        while j > 0 and vol[j] == 0 and adj[j] == adj[j - 1]:
+            run += 1
+            j -= 1
+        if run >= HALT_RUN_MIN:
+            cls = "halt_reprice"
+        elif vol[i] == 0:
+            cls = "stale_close"
+        elif dead and i + 1 >= n - TERM_WINDOW_TD:
+            cls = "terminal"
+        else:
+            cls = "unexplained"
+        out.append((int(i), float(logret[i]), cls))
+    return out
+
+
+def yearly_returns(dates: np.ndarray, adj: np.ndarray, close: np.ndarray, year_min: int):
     """{year: simple return} per calendar year. Reference = last close of the previous
-    present year, else (IPO year) the first close of the year if >= MIN_IPO_YEAR_BARS bars."""
+    present year, else (IPO year) the first close of the year if >= MIN_IPO_YEAR_BARS bars.
+    Year-returns where either endpoint's RAW close is sub-penny are excluded — those are
+    quote noise, not tradeable prints (adjusted closes may be legitimately tiny, raw not)."""
     years = np.array([int(d[:4]) for d in dates])
     out = {}
-    prev_year, prev_last = None, None
+    prev_year, prev_last, prev_close = None, None, 0.0
     for y in np.unique(years):
         m = years == y
-        a = adj[m]
-        if int(y) >= year_min:
-            if prev_year == y - 1 and prev_last and prev_last > 0:
+        a, c = adj[m], close[m]
+        if int(y) >= year_min and c[-1] >= UNTRADEABLE_CLOSE:
+            if prev_year == y - 1 and prev_last and prev_last > 0 and prev_close >= UNTRADEABLE_CLOSE:
                 out[int(y)] = float(a[-1] / prev_last - 1.0)
-            elif len(a) >= MIN_IPO_YEAR_BARS and a[0] > 0:
+            elif prev_year != y - 1 and len(a) >= MIN_IPO_YEAR_BARS and a[0] > 0 and c[0] >= UNTRADEABLE_CLOSE:
                 out[int(y)] = float(a[-1] / a[0] - 1.0)
-        prev_year, prev_last = y, float(a[-1])
+        prev_year, prev_last, prev_close = y, float(a[-1]), float(c[-1])
     return out, set(int(v) for v in np.unique(years))
 
 
@@ -135,7 +182,7 @@ def main():
     spy_pq = os.path.join(args.data_dir, "parquet", "SPY.parquet")
     if not os.path.exists(spy_pq):
         sys.exit("missing data/parquet/SPY.parquet; run download_prices.py / rf_spy.py first")
-    spy = pd.read_parquet(spy_pq, columns=["date", "adjusted_close"])
+    spy = pd.read_parquet(spy_pq, columns=["date", "close", "adjusted_close"])
     spy_dates = spy["date"]
     burnin_start, start, end = resolve_era(eras[args.era], spy_dates)
     end_ts = pd.Timestamp(end)
@@ -147,9 +194,9 @@ def main():
     parquet_dir = os.path.join(args.data_dir, "parquet")
 
     rows, clip_log, break_log = [], {}, {}
-    sever_log, pin_log = [], {}
-    drops = {"no_data": [], "insufficient_window_data": [], "delisted_outside_window": [],
-             "qc_breaks": [], "dup_class": []}
+    sever_log, splice_log, pin_log = [], [], {}
+    drops = {"no_data": [], "test_symbol": [], "insufficient_window_data": [],
+             "delisted_outside_window": [], "qc_breaks": [], "dup_class": []}
     sym_years, sym_yret = {}, {}
     downloaded = 0
 
@@ -157,6 +204,9 @@ def main():
         if n_done and n_done % 2000 == 0:
             print(f"  qc {n_done}/{len(candidates)} ...", flush=True)
         sym = cand["symbol"]
+        if TEST_CODE_RE.match(sym) or TEST_NAME_RE.search((cand.get("name") or "").upper()):
+            drops["test_symbol"].append(sym)  # exchange test symbol: synthetic prices
+            continue
         pq = os.path.join(parquet_dir, f"{sym}.parquet")
         if not os.path.exists(pq):
             drops["no_data"].append(sym)
@@ -210,6 +260,31 @@ def main():
                 pin_log[sym] = int(len(df) - 1 - k)
                 df = df.iloc[:k + 1]
 
+        # Splice severing: one-day moves no continuous company can print (constants above).
+        # UP > +395%: severed regardless of class — no real resumption/repricing gains that
+        # much in a day (observed carve-out abuses: zero-volume flat run then a x600,000
+        # "reprice" = recycled-ticker splice). DOWN < -92%: post-halt repricings and terminal
+        # collapses are real (fraud halts resume near zero) and are carved out.
+        if len(df) > 1:
+            a = df["adjusted_close"].to_numpy()
+            v = df["volume"].to_numpy()
+            cuts = [i for i, lr, cls in classify_breaks(a, v, dead=not is_listed_now)
+                    if lr > SPLICE_UP_LOGRET
+                    or (lr < SPLICE_DOWN_LOGRET and cls in ("unexplained", "stale_close"))]
+            if cuts:
+                dts = df["date"].to_numpy()
+                bounds = [0] + [c + 1 for c in cuts] + [len(df)]
+                segs = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+                lo, hi = segs[-1] if is_listed_now else segs[0]
+                splice_log.append({
+                    "symbol": sym, "kept": "last" if is_listed_now else "first",
+                    "kept_span": [str(dts[lo]), str(dts[hi - 1])],
+                    "removed_bars": int(len(df) - (hi - lo)),
+                    "splices": [{"date": str(dts[c + 1]), "logret": round(float(np.log(a[c + 1] / a[c])), 2)}
+                                for c in cuts[:8]],
+                })
+                df = df.iloc[lo:hi]
+
         first_date, last_date = df["date"].iloc[0], df["date"].iloc[-1]
 
         # Delisted-list candidates: era membership = (severed) history ends inside the window.
@@ -231,33 +306,14 @@ def main():
             term_ret = a[-1] / base - 1.0 if base > 0 else 0.0
             termination = "bankruptcy" if term_ret < BANKRUPT_RET else "acquisition"
 
-        # Discontinuity breaks inside the era window, classified (module docstring).
-        wadj = win["adjusted_close"].to_numpy()
-        wvol = win["volume"].to_numpy()
-        logret = np.diff(np.log(wadj))
-        brk = np.flatnonzero(np.abs(logret) > BREAK_ABS_LOGRET)
-        if len(brk):
-            n_win = len(win)
-            events, n_unexplained = [], 0
-            for i in brk:
-                run = 0
-                j = i
-                while j > 0 and wvol[j] == 0 and wadj[j] == wadj[j - 1]:
-                    run += 1
-                    j -= 1
-                if run >= HALT_RUN_MIN:
-                    cls = "halt_reprice"
-                elif wvol[i] == 0:
-                    cls = "stale_close"
-                elif termination != "alive" and i + 1 >= n_win - TERM_WINDOW_TD:
-                    cls = "terminal"
-                else:
-                    cls = "unexplained"
-                    n_unexplained += 1
-                events.append({"date": str(win["date"].iloc[i + 1]),
-                               "logret": round(float(logret[i]), 4), "class": cls})
-            break_log[sym] = events
-            if n_unexplained > MAX_BREAKS:
+        # Remaining discontinuity breaks inside the era window, classified + logged.
+        evts = classify_breaks(win["adjusted_close"].to_numpy(), win["volume"].to_numpy(),
+                               dead=termination != "alive")
+        if evts:
+            wd = win["date"].to_numpy()
+            break_log[sym] = [{"date": str(wd[i + 1]), "logret": round(lr, 4), "class": cls}
+                              for i, lr, cls in evts]
+            if sum(1 for _, _, cls in evts if cls == "unexplained") > MAX_BREAKS:
                 drops["qc_breaks"].append(sym)
                 continue
 
@@ -267,7 +323,8 @@ def main():
         if not math.isfinite(dv):
             dv = 0.0
 
-        yret, yrs = yearly_returns(win["date"].to_numpy(), win["adjusted_close"].to_numpy(), start_year)
+        yret, yrs = yearly_returns(win["date"].to_numpy(), win["adjusted_close"].to_numpy(),
+                                   win["close"].to_numpy(), start_year)
         sym_years[sym] = yrs
         sym_yret[sym] = yret
 
@@ -323,18 +380,19 @@ def main():
                 year_rets[y].append(r)
 
     spy_win = spy[(spy["date"] >= burnin_start) & (spy["date"] <= end)]
-    spy_yret, _ = yearly_returns(spy_win["date"].to_numpy(),
-                                 spy_win["adjusted_close"].to_numpy(), start_year)
+    spy_yret, _ = yearly_returns(spy_win["date"].to_numpy(), spy_win["adjusted_close"].to_numpy(),
+                                 spy_win["close"].to_numpy(), start_year)
     canary = []
     for y in years:
         rs = np.array(year_rets[y], dtype="float64")
         if not len(rs) or y not in spy_yret:
             continue
-        ew = float(rs.mean())
+        capped = np.minimum(rs, CANARY_CAP_RET)
+        ew = float(capped.mean())
         med = float(np.median(rs))
-        win1 = float(np.clip(rs, np.quantile(rs, 0.01), np.quantile(rs, 0.99)).mean())
         row = {"year": y, "n": int(len(rs)), "ew_mean": round(ew, 4),
-               "ew_mean_wins1pct": round(win1, 4), "median": round(med, 4),
+               "ew_mean_uncapped": round(float(rs.mean()), 4),
+               "n_capped": int((rs > CANARY_CAP_RET).sum()), "median": round(med, 4),
                "spy": round(spy_yret[y], 4), "diff_pp": round((ew - spy_yret[y]) * 100, 1),
                "flag": abs(ew - spy_yret[y]) > CANARY_PP}
         canary.append(row)
@@ -357,6 +415,7 @@ def main():
         "drops": {k: {"count": len(v), "symbols": sorted(v)} for k, v in drops.items()},
         "clipped_nonpositive_prices": clip_log,
         "reuse_severed": sever_log,
+        "splice_severed": splice_log,
         "stale_pin_trimmed": pin_log,
         "breaks_flagged": {k: v for k, v in sorted(break_log.items())},
         "n_break_symbols": len(break_log),
