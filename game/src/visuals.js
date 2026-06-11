@@ -48,13 +48,57 @@ export function setupLights(scene) {
   return { hemi, sun };
 }
 
+/** One snow-texture repeat per 4×4 world m (lanes are 1 m): small enough that grain reads
+ *  at skiing speed, large enough to avoid moire/banding at distance. terrain.js divides
+ *  world (x, z) by this when writing the uv attribute. */
+export const SNOW_TEX_TILE_M = 4;
+
+/**
+ * Snow PBR texture set (ambientCG Snow005, CC0 — see game/public/textures/snow/README.md),
+ * loaded async and attached to the material when ALL maps arrive. If any fetch fails the
+ * material simply stays untextured (mobile/offline fallback — no hard dependency).
+ */
+function loadSnowTextures(material) {
+  const loader = new THREE.TextureLoader();
+  const one = (file, srgb) =>
+    new Promise((resolve, reject) => {
+      loader.load(
+        `textures/snow/${file}`,
+        (tex) => {
+          tex.wrapS = tex.wrapT = THREE.RepeatWrapping; // planar world UVs tile forever
+          tex.anisotropy = 4; // cheap, big sharpness win at the grazing angles a chase cam lives at
+          if (srgb) tex.colorSpace = THREE.SRGBColorSpace; // albedo is authored sRGB; data maps stay linear
+          resolve(tex);
+        },
+        undefined,
+        reject
+      );
+    });
+  Promise.all([
+    one('Snow005_1K_Color.jpg', true),
+    one('Snow005_1K_NormalGL.jpg', false),   // GL convention — what Three.js expects
+    one('Snow005_1K_Roughness.jpg', false),
+  ])
+    .then(([map, normalMap, roughnessMap]) => {
+      material.map = map;
+      material.normalMap = normalMap;
+      // 0.4: micro-grain only — terrain geometry carries the macro shape (task spec)
+      material.normalScale.set(0.4, 0.4);
+      material.roughnessMap = roughnessMap; // multiplies the 0.92 base: dry snow stays diffuse
+      material.needsUpdate = true; // recompile with USE_MAP etc.; onBeforeCompile re-applies our patches
+    })
+    .catch(() => {}); // untextured fallback is the material as constructed
+}
+
 /**
  * Snow-white standard material with three shader extensions:
- *  1. slope tint — steeper faces shade toward blue ice (plan §7);
+ *  1. slope tint — steeper faces shade toward blue ice (plan §7); applied MULTIPLICATIVELY
+ *     after map_fragment so the albedo texture grain survives on steep faces;
  *  2. frontier clip — fragments at world z < −τ·DAY_M are discarded, so the visible snow
  *     edge IS the frontier and nothing beyond τ can ever render (plan §4.5);
  *  3. fresh-snow shimmer — emissive boost on the newest ~2 day-strips, fading as they age.
- * Returns {material, uniforms}; frontier.js drives uniforms.uTau each frame.
+ * Plus a CC0 snow PBR texture set (albedo/normal/roughness), loaded async with an
+ * untextured fallback. Returns {material, uniforms}; frontier.js drives uniforms.uTau.
  */
 export function makeSnowMaterial() {
   const uniforms = { uTau: { value: 0 } };
@@ -63,6 +107,7 @@ export function makeSnowMaterial() {
     roughness: 0.92,  // dry snow: almost fully diffuse
     metalness: 0.0,
   });
+  loadSnowTextures(material);
   const dayM = CFG.DAY_M.toFixed(4); // world z = −day·DAY_M (CONTRACTS §3)
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTau = uniforms.uTau;
@@ -95,9 +140,11 @@ export function makeSnowMaterial() {
         '#include <color_fragment>',
         `#include <color_fragment>
         {
-          // slope-based tint: steeper = bluer ice (plan §7); 0.12..0.65 up-ness band, 0.85 max blend
+          // slope-based tint: steeper = bluer ice (plan §7); 0.12..0.65 up-ness band, 0.85 max blend.
+          // MULTIPLICATIVE (color_fragment runs after map_fragment): texture grain survives the tint;
+          // (0.60, 0.72, 0.90) ≈ old constant / the near-white base, so the untextured look is unchanged.
           float steep = clamp(1.0 - vSnowUp, 0.0, 1.0);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.58, 0.70, 0.88), smoothstep(0.12, 0.65, steep) * 0.85);
+          diffuseColor.rgb *= mix(vec3(1.0), vec3(0.60, 0.72, 0.90), smoothstep(0.12, 0.65, steep) * 0.85);
         }`
       )
       .replace(

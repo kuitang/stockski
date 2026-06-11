@@ -37,7 +37,13 @@ export const PHYS = {
   SINK_RATE: 2,       // m/s terminal sink per unit w on a void lane: slow enough to read the halt and dial w→0 (plan §3: death REQUIRES w=1)
   NEIGHBOR_PROBE: 8,  // lanes scanned each side for the live-neighbor floor: beyond 8 lanes a void reads as open field, not a crevasse wall
   TRADING_DAYS: 252,  // trading days per year: converts annualized r_f to per-trading-day rate (plan §2)
+  BORROW_SPREAD: 0.015, // annual spread over r_f on the borrowed (1−w)<0 leg when w>1: brokers don't lend
+                        // at the T-bill rate — ~150 bp is the cheap end of retail margin over benchmark
 };
+
+// Detent band is symmetric about w=1 (plan §3 + leverage ext): crossing into [W_DETENT, 2−W_DETENT]
+// from either side latches w=1; pushing past 1 needs deliberate input exactly like dropping below.
+const W_DETENT_HI = 2 - CFG.W_DETENT; // mirror of CFG.W_DETENT above 1 (0.92 → 1.08)
 
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 // void lane carries no trading: a halted name contributes 0 to the integral (loss lands via death, plan §3)
@@ -52,9 +58,9 @@ export class Skier {
     this.world = world;
     this.s = s0;
     this.day = day0;
-    this.w = clamp(w0, 0, 1);
-    // spawning above the detent counts as snapped — w=1 is the sticky state (plan §3)
-    this._snapped = this.w > CFG.W_DETENT;
+    this.w = clamp(w0, 0, CFG.W_MAX); // [0, 2]: w>1 borrows the (1−w)<0 leg at r_f + spread (plan §2 ext)
+    // spawning inside the detent band counts as snapped — w=1 is the sticky state (plan §3)
+    this._snapped = this.w > CFG.W_DETENT && this.w < W_DETENT_HI;
     if (this._snapped) this.w = 1;
     this.vs = 0;
     this.vy = 0;
@@ -87,7 +93,7 @@ export class Skier {
   /**
    * Advance one fixed timestep.
    * @param dtSec  seconds (caller uses 1/CFG.PHYS_HZ)
-   * @param input  { steer: -1..1, wTarget: 0..1 }
+   * @param input  { steer: -1..1, wTarget: 0..CFG.W_MAX }
    * @returns state snapshot (CONTRACTS §3 State + probe internals)
    */
   step(dtSec, input = {}) {
@@ -109,14 +115,27 @@ export class Skier {
     }
 
     // over void there is nothing to BUY: wTarget can hold or reduce exposure but not raise it
-    // (you cannot buy a delisted name; bankruptcy death still requires RIDING IN fully
-    // weighted with the detent latched, plan §2.3 — that path is untouched)
-    let wTarget = clamp(input.wTarget ?? this.w, 0, 1);
+    // (you cannot buy a delisted name — nor lever further into one; bankruptcy death still
+    // requires RIDING IN fully weighted with the detent latched, plan §2.3 — that path is untouched)
+    let wTarget = clamp(input.wTarget ?? this.w, 0, CFG.W_MAX);
     if (!q) wTarget = Math.min(wTarget, this.w);
     this._dial(wTarget, dtSec);
 
+    // MARGIN CALL (plan §2 ext, leverage): with w·u_dead ≥ 1 on a dead leg the effective loss
+    // log(1 − w·u_dead) is −∞ — equity is wiped before the crater bottoms out, so the broker
+    // liquidates instantly: total loss even at u < 1. At w = 2 the death region invades the
+    // margin to u = 0.5 exactly. Only reachable when w > 1 (at w ≤ 1, w·u ≥ 1 means w = 1 on
+    // the dead plateau — that stays the cinematic crevasse fall below, same total loss).
+    if (this.w > 1 && this.w * this._voidExposure(q) >= 1) {
+      this._die('margin-call');
+      return this._state();
+    }
+
     // --- WEALTH: the invariant (plan §2.1). Sideways motion changes nothing except u. ---
-    const rfDaily = this.world.rfAnnual(this.day) / PHYS.TRADING_DAYS;
+    // w > 1 prices the borrow on the (1−w) < 0 leg at r_f + BORROW_SPREAD (you PAY the spread);
+    // w ≤ 1 lends the (1−w) ≥ 0 leg at the plain T-bill rate — the formula is otherwise unchanged.
+    const rfLeg = this.world.rfAnnual(this.day) + (this.w > 1 ? PHYS.BORROW_SPREAD : 0);
+    const rfDaily = rfLeg / PHYS.TRADING_DAYS;
     this.logW += this._stockReturn(dday) + (1 - this.w) * rfDaily * dday;
 
     // world clock advances; the skier is pinned to the frontier (plan §0)
@@ -137,24 +156,55 @@ export class Skier {
     return this._state();
   }
 
-  // w moves toward wTarget at DIAL_RATE; detent at 1 with hysteresis (plan §2.3/§3)
+  // w moves toward wTarget at DIAL_RATE; detent at 1 with hysteresis BOTH directions (plan §3 + leverage):
+  // pushing past 1 into leverage needs deliberate input, dropping below 1 likewise. No detent at
+  // W_MAX = 2 — that is a hard cap, not a sticky state.
   _dial(wTarget, dt) {
     if (this._snapped) {
-      if (wTarget < CFG.W_DETENT - PHYS.DETENT_RELEASE) {
-        this._snapped = false; // deliberate input: unlatch and let the dial run below
+      const below = wTarget < CFG.W_DETENT - PHYS.DETENT_RELEASE; // deliberate pull under the band
+      const above = wTarget > W_DETENT_HI + PHYS.DETENT_RELEASE;  // deliberate push into leverage
+      if (below || above) {
+        this._snapped = false; // unlatch and let the dial run past 1
       } else {
         this.w = 1;
         return;
       }
     }
+    const prev = this.w;
     const maxStep = PHYS.DIAL_RATE * dt;
     const dw = clamp(wTarget - this.w, -maxStep, maxStep);
     this.w += dw;
-    // detent engages only when pushing UP into it — dialing down through the band must not re-latch
-    if (dw > 0 && this.w > CFG.W_DETENT) {
+    // detent engages only when CROSSING into the band toward 1 from outside — continuing the
+    // dial away from 1 after a deliberate unlatch must not re-latch mid-band
+    const upIn = dw > 0 && prev <= CFG.W_DETENT && this.w > CFG.W_DETENT;  // from below
+    const downIn = dw < 0 && prev >= W_DETENT_HI && this.w < W_DETENT_HI;  // from above (leverage)
+    if (upIn || downIn) {
       this.w = 1; // sticky full exposure: finite-measure wipeout condition (plan §3)
       this._snapped = true;
     }
+  }
+
+  /** Fraction of the current blend pair that sits on LOSS-bearing void terrain — the u_dead in the
+   *  margin-call rule w·u_dead ≥ 1. Wholly on a dead plateau (q = null) ⇒ 1 (the acquisition case
+   *  was already cashed out by the kicker before this runs). Acquisition-terminated legs are
+   *  excluded in the margin too: shareholders got cash at the final price, never a loss (plan §2.3).
+   *  Prefers laneZ (finite ⇒ live, matches the wealth path); falls back to laneRate for mock worlds. */
+  _voidExposure(q) {
+    if (!q) return 1;
+    const vI = this._laneVoid(this.lane) && !this._isAcquired(this.lane);
+    const vJ = this._laneVoid(this.lane + 1) && !this._isAcquired(this.lane + 1);
+    return (vI ? 1 - q.u : 0) + (vJ ? q.u : 0);
+  }
+
+  _isAcquired(lane) {
+    const info = this.world.laneTerm?.(lane);
+    return !!info && info.term === 'acquisition';
+  }
+
+  _laneVoid(lane) {
+    const w = this.world;
+    if (typeof w.laneZ === 'function') return !Number.isFinite(w.laneZ(lane, this.day));
+    return !Number.isFinite(w.laneRate(lane, this.day));
   }
 
   /** True when the lane carrying the skier's dominant weight ended by ACQUISITION and the

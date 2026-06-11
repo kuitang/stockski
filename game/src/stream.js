@@ -18,6 +18,59 @@ function fcSlope(a, b) {
   return (2 * a * b) / (a + b);
 }
 
+// --- tile obfuscation decode (CONTRACTS §2 "enc" v1): per-tile lane shuffle + xorshift32 XOR.
+// Keys derive from era/tile coords — deters copying integers out of a public deploy; not DRM.
+const SEED_FALLBACK = 0x9e3779b9; // golden-ratio constant: any fixed nonzero seed works for xorshift
+
+function fnv1a(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function xs32(x) {
+  x = (x ^ (x << 13)) >>> 0;
+  x = (x ^ (x >>> 17)) >>> 0;
+  x = (x ^ (x << 5)) >>> 0;
+  return x;
+}
+
+function lanePerm(seed, tl) {
+  let x = seed || SEED_FALLBACK;
+  const perm = new Array(tl);
+  for (let i = 0; i < tl; i++) perm[i] = i;
+  for (let i = tl - 1; i > 0; i--) {
+    x = xs32(x);
+    const j = x % (i + 1);
+    const t = perm[i];
+    perm[i] = perm[j];
+    perm[j] = t;
+  }
+  return perm;
+}
+
+/** XOR first, then unshuffle: plain[r][perm[c]] = enc[r][c] (inverse of the encoder). */
+export function decodeTile(buf, era, T, L, tl) {
+  const u = new Uint16Array(buf);
+  let x = fnv1a(`${era}:${T}:${L}:carve-not-copy`) || SEED_FALLBACK;
+  for (let i = 0; i < u.length; i++) {
+    x = xs32(x);
+    u[i] ^= x & 0xffff;
+  }
+  const enc = new Int16Array(buf);
+  const perm = lanePerm(fnv1a(`${era}:${T}:${L}:lane-shuffle`) || SEED_FALLBACK, tl);
+  const out = new Int16Array(enc.length);
+  const rows = enc.length / tl;
+  for (let r = 0; r < rows; r++) {
+    const base = r * tl;
+    for (let c = 0; c < tl; c++) out[base + perm[c]] = enc[base + c];
+  }
+  return out;
+}
+
 export class TileStream {
   /**
    * @param {string|null} manifestUrl  e.g. 'tiles/recent2y/manifest.json'
@@ -85,7 +138,11 @@ export class TileStream {
             if (!r.ok) throw new Error(`tile t${T}_l${L}: HTTP ${r.status}`);
             return r.arrayBuffer();
           })
-          .then((buf) => new Int16Array(buf));
+          .then((buf) =>
+            this.manifest.enc?.v === 1
+              ? decodeTile(buf, this.manifest.era, T, L, this.tl)
+              : new Int16Array(buf)
+          );
     p.then((tile) => this._insert(key, tile))
       .catch(() => {}) // missing tile = permanent void; zRaw stays null there
       .finally(() => this.inflight.delete(key));

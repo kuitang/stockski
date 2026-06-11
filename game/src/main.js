@@ -26,11 +26,7 @@ async function loadOptional(name) {
 const START_TAU = 1;        // spawn at day 1 (task spec): one revealed day-strip behind you, dayRet defined
 const SPAWN_WAIT_MS = 8000; // first-tile budget: matches plan §7 mobile load target (< 8 s)
 const RESPAWN_DELAY_MS = 1800; // long enough to read the death cause, short enough to retry eagerly
-const CAM_BACK = 13;        // chase cam: m behind the skier (+z = into history)
-const CAM_UP = 8;           // m above — high enough to read the frontier slice
-const CAM_SIDE = 5;         // m lateral offset = the "¾" in ¾ chase cam (plan §0)
-const CAM_LOOK_AHEAD = 30;  // m past the skier into the whiteout (task spec: look past the skier)
-const CAM_DAMP = 0.0008;    // per-second residual of camera lag: snappy but never rigid
+const CAM = CFG.CAM;        // ¾ chase camera geometry: high, pitched down, zoomed out (CFG.CAM, config.js)
 const STUB_LAT_MS = 6;      // physics-stub lateral speed m/s (~6 lanes/s): brisk terrain eyeballing
 const STUB_FLOAT_M = 1.5;   // physics-stub visual float at w=0 — mirrors plan §3 "float ∝ (1−w)"
 const START_WEALTH_FALLBACK = 100000; // $100k start if hud.js (which owns START_WEALTH) is absent
@@ -159,7 +155,7 @@ async function boot() {
   document.getElementById('app').appendChild(renderer.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xf6f8fc); // storm white: void beyond the frontier reads as whiteout
-  const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 5000);
+  const camera = new THREE.PerspectiveCamera(CAM.FOV, innerWidth / innerHeight, 0.1, 5000);
   addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
@@ -416,11 +412,12 @@ async function boot() {
     skierMesh.rotation.y = -(state.vs ?? 0) * 0.04; // lean into the carve: 0.04 rad per m/s reads as edging
     frontier.update(clock.tau, state.s, state.y);
 
-    // ¾ chase camera: behind (+z), above, offset laterally; looking past the skier into the whiteout
-    const camTarget = _camV.set(state.s + CAM_SIDE, state.y + CAM_UP, z + CAM_BACK);
+    // ¾ chase camera: high behind the skier, pitched down at a point past the frontier — the
+    // skier sits small in the lower third and never occludes the slope read ahead (CFG.CAM)
+    const camTarget = _camV.set(state.s + CAM.SIDE, state.y + CAM.UP, z + CAM.BACK);
     if (firstFrame) camera.position.copy(camTarget);
-    else camera.position.lerp(camTarget, 1 - Math.pow(CAM_DAMP, dt));
-    camera.lookAt(state.s, state.y + 1, z - CAM_LOOK_AHEAD);
+    else camera.position.lerp(camTarget, 1 - Math.pow(CAM.DAMP, dt));
+    camera.lookAt(state.s, state.y - CAM.DROP, z - CAM.AHEAD);
     sky.position.copy(camera.position); // sky is at infinity: never parallax
 
     if (hud) {

@@ -59,6 +59,15 @@ Era build output under `game/public/tiles/<era>/`:
   "metrics": { "mom20": "tiles/<era>/mom20/", ... } // optional causal overlay tile dirs
 }
 ```
+- Tile obfuscation (`"enc": {"v": 1}` in manifest): deters literal copy-paste of the int16 grid out of a
+  public deployment — NOT DRM (the AGPL decoder ships with the game; plan §5 license caution, user-accepted).
+  Encoding, applied by `pipeline/obfuscate_tiles.py` per tile, decoded in `stream.js`:
+  1. Lane shuffle: `perm` = Fisher-Yates of `[0..tileLanes)` driven by xorshift32 seeded
+     `fnv1a("<era>:<T>:<L>:lane-shuffle")`; encoded column c holds plaintext column `perm[c]`.
+  2. Keystream: every uint16 word XORed with successive `xorshift32(fnv1a("<era>:<T>:<L>:carve-not-copy"))`
+     outputs (low 16 bits), applied after the shuffle. Seeds of 0 are replaced with 0x9E3779B9.
+  Decoder order: XOR first, then unshuffle (`plain[r][perm[c]] = enc[r][c]`). Plain (`enc` absent) tiles
+  remain supported — both formats are valid per this contract.
 - `z/t<T>_l<L>.bin`: little-endian int16, row-major `[day][lane]`, `TILE_DAYS*TILE_LANES` entries.
   Day rows are tile-local: global day = T*TILE_DAYS + row; lane = L*TILE_LANES + col.
   Value = round(z_i(d)*1000) where z_i = c_i + log(P/P_first) (plan §1); Z_NAN where no terrain.

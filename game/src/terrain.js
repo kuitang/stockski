@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { CFG } from './config.js';
 import { PREFETCH_DAYS, VIEW_LANES } from './stream.js';
+import { SNOW_TEX_TILE_M } from './visuals.js';
 
 const A2 = CFG.ALPHA_PLATEAU / 2;     // plateau half-width in lane units (plan §1)
 const MARGIN = 1 - CFG.ALPHA_PLATEAU; // margin width between adjacent plateaus in lane units
@@ -150,6 +151,7 @@ export class TerrainTiles {
     xs[W - 1] = lane0 + tl;
 
     const pos = new Float32Array(rows * W * 3);
+    const uv = new Float32Array(rows * W * 2); // planar world (x, z)/SNOW_TEX_TILE_M for the snow texture set
     const voidMask = new Uint8Array(rows * W);
     for (let r = 0; r < rows; r++) {
       const day = startDay + r;
@@ -160,6 +162,10 @@ export class TerrainTiles {
         pos[3 * k] = xs[c] * CFG.LANE_M;
         pos[3 * k + 1] = bad ? 0 : q.h; // parked at 0, never referenced by an index (keeps normals/bounds finite)
         pos[3 * k + 2] = -day * CFG.DAY_M; // CONTRACTS §3: world z = −day
+        // pre-translation (s, −day) coords: wraparound parking moves meshes by span = nLanes·LANE_M,
+        // a multiple of TILE_LANES = 128 m, i.e. an integer number of 4 m texture repeats — seam-safe
+        uv[2 * k] = pos[3 * k] / SNOW_TEX_TILE_M;
+        uv[2 * k + 1] = pos[3 * k + 2] / SNOW_TEX_TILE_M;
         if (bad) voidMask[k] = 1;
       }
     }
@@ -181,6 +187,7 @@ export class TerrainTiles {
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geo.setIndex(idx);
     geo.computeVertexNormals();
     geo.setDrawRange(0, 0);
