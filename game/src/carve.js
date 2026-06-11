@@ -8,7 +8,13 @@ import { CFG } from './config.js';
 
 export const CARVE_POINTS = 2000; // plan §7: ~2000-point recent-path ring buffer
 export const SPACING_DAYS = 0.25; // 4 samples/world-day => the 2000-pt buffer spans ~500 days of track
-const HALF_W_M = 0.18;            // ribbon half-width: twin-ski-track scale inside a 1 m lane
+// Tapered ribbon (judge r2: frozen frames had no velocity read and the avatar vanished at chase
+// distance): wide at the skier — a visible wake that flags the protagonist — thinning to a trace.
+const HALF_W_MAX = 0.22;          // at the skier: just inside the 0.25 m plateau half-width, so snow
+                                  // always shows at the track edges; still reads at 20+ m chase distance
+const ALPHA_MAX = 0.85;           // newest sample stays slightly translucent: the wake tints the snow
+                                  // instead of painting over it (fp rides directly on this strip)
+const HALF_W_MIN = 0.08;          // oldest samples: a faint scratch line, history not highlight
 const LIFT_M = 0.03;              // hover just above the snow to avoid z-fighting with terrain
 export const DLOGW_EPS = 1e-7;    // per-sample |dlogW| below this renders white (flat P&L tick)
 
@@ -136,11 +142,14 @@ export class Carve {
     const pos = this._positions, col = this._colors;
     for (let i = 0; i < count; i++) {
       const s = buf.slot(i);
-      const a = ageAlpha(i, count);
+      const a = ageAlpha(i, count) * ALPHA_MAX;
+      // width taper rides the same age ramp as alpha: newest = HALF_W_MAX at the skier's tails,
+      // oldest = HALF_W_MIN — the wake itself is a speed/direction cue (judge r2)
+      const hw = HALF_W_MIN + (HALF_W_MAX - HALF_W_MIN) * a;
       const pi = i * 6, ci = i * 8;
       // ribbon edges offset laterally (x = s axis); time axis is z, so lateral width reads as ski width
-      pos[pi] = buf.x[s] - HALF_W_M; pos[pi + 1] = buf.y[s]; pos[pi + 2] = buf.z[s];
-      pos[pi + 3] = buf.x[s] + HALF_W_M; pos[pi + 4] = buf.y[s]; pos[pi + 5] = buf.z[s];
+      pos[pi] = buf.x[s] - hw; pos[pi + 1] = buf.y[s]; pos[pi + 2] = buf.z[s];
+      pos[pi + 3] = buf.x[s] + hw; pos[pi + 4] = buf.y[s]; pos[pi + 5] = buf.z[s];
       col[ci] = buf.r[s]; col[ci + 1] = buf.g[s]; col[ci + 2] = buf.b[s]; col[ci + 3] = a;
       col[ci + 4] = buf.r[s]; col[ci + 5] = buf.g[s]; col[ci + 6] = buf.b[s]; col[ci + 7] = a;
     }

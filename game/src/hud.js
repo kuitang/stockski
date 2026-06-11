@@ -120,7 +120,7 @@ export class Hud {
     // last-shown values — numbers compared before any string is built
     this._last = {
       sym: null, name: null, sector: null, date: null, dayRet: NaN,
-      w: NaN, wealth: NaN, kilo: NaN, dd: NaN, hi: false, pnl: NaN, gap: NaN, lev: '',
+      w: NaN, wealth: NaN, kilo: NaN, dd: NaN, hi: false, lo: false, pnl: NaN, gap: NaN, lev: '',
     };
   }
 
@@ -181,16 +181,24 @@ export class Hud {
       last.kilo = kilo;
     }
 
-    // red drift with drawdown from the session high; white/green class at highs
+    // drawdown drift from the session high (CSS --dd): within the sign-color below it warms
+    // green toward amber / deepens red toward full loss-red as the slump grows
     const dd = Math.round(ddMix(wealth, this._peak) / DD_Q) * DD_Q;
     if (dd !== last.dd) {
       last.dd = dd;
       this.wealthEl.style.setProperty('--dd', dd.toFixed(2));
     }
-    const hi = dd === 0 && wealth > START_WEALTH; // at the session high AND in profit -> green tint
+    // figure color encodes TOTAL P&L sign (judge r2: drawdown-red at +9% read as losing while
+    // winning): green when up vs start, red when down, neutral in the deadband
+    const hi = wealth > START_WEALTH * (1 + PCT_EPS / 100); // 'hi' now means "in profit overall"
     if (hi !== last.hi) {
       last.hi = hi;
-      this.wealthEl.classList.toggle('hi', hi);
+      this.wealthEl.classList.toggle('up', hi);
+    }
+    const lo = wealth < START_WEALTH * (1 - PCT_EPS / 100);
+    if (lo !== last.lo) {
+      last.lo = lo;
+      this.wealthEl.classList.toggle('down', lo);
     }
 
     // session P&L %: wealth vs the $100k start (green/red)

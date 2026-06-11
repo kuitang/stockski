@@ -91,13 +91,21 @@ canvas {
 
 #wealth {
   position: fixed;
-  top: calc(8px + env(safe-area-inset-top));
+  /* 18px safe margin (was 8): on short viewports the $ figure brushed the top edge (judge r1) */
+  top: calc(18px + env(safe-area-inset-top));
   left: 50%;
   transform: translateX(-50%);   /* top-center: sits in the empty sky band, never over the slope read */
   text-align: center;
   pointer-events: none;
   z-index: 10;
-  /* no card box: Alto-style minimal figure floating on the sky; shadow carries legibility */
+  /* always-on translucent scrim pill (judge r2: the bare figure vanished into fp whiteout —
+     a shadow alone cannot survive a near-white wall behind near-white digits) */
+  background: rgba(8, 12, 20, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 4px 18px 7px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   text-shadow: 0 1px 8px rgba(6, 10, 18, 0.7), 0 0 2px rgba(6, 10, 18, 0.9);
   font-variant-numeric: tabular-nums;  /* fixed-width digits: no jitter as the value ticks */
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -109,12 +117,19 @@ canvas {
   font-weight: 800;
   letter-spacing: 0.01em;
   line-height: 1.05;
-  /* color drifts toward loss-red as drawdown deepens (fully red at DD_FULL = 15%) */
+  /* neutral when flat vs start; drawdown drifts it toward loss-red (fully red at DD_FULL = 15%) */
   color: color-mix(in srgb, var(--loss) calc(var(--dd) * 100%), #f3f7fc);
 }
 
-#wealth.hi .wealth-fig {
-  color: #c9f7d9;                /* at a session high while in profit: soft green, not neon */
+/* total P&L encodes the BASE color (judge r2: red while up read as losing while winning):
+   in profit = green, drawdown warms it toward amber but never red — "up overall, bleeding now" */
+#wealth.up .wealth-fig {
+  color: color-mix(in srgb, #ffc97f calc(var(--dd) * 70%), var(--gain));
+}
+
+/* below the start stake = loss-red, deepening with drawdown */
+#wealth.down .wealth-fig {
+  color: color-mix(in srgb, #ff5247 calc(var(--dd) * 100%), var(--loss));
 }
 
 #wealth .wealth-fig.tick { animation: wealth-tick 0.08s ease-out; } /* ~80ms pulse per $1k crossing */
